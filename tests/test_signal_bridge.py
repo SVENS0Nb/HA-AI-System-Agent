@@ -137,7 +137,9 @@ class LocalSignalBridgeTests(unittest.IsolatedAsyncioTestCase):
             config_dir=Path(self.temp.name) / "isolated-signal",
             entrypoint=entrypoint,
         )
-        process = type("Process", (), {"pid": 12345, "returncode": None})()
+        process = type(
+            "Process", (), {"pid": 12345, "returncode": None, "stdout": None}
+        )()
         create = AsyncMock(return_value=process)
         with (
             patch.dict(
@@ -161,7 +163,16 @@ class LocalSignalBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(environment["PATH"], "/usr/bin:/bin")
         self.assertEqual(environment["SIGNAL_CLI_CONFIG_DIR"], str(bridge.config_dir))
 
-    async def test_unhealthy_live_bridge_process_is_restarted(self) -> None:
+    async def test_bridge_failure_output_is_redacted_before_display(self) -> None:
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"startup failed api_key=super-secret-value\n")
+        reader.feed_eof()
+        await self.bridge._drain_output(reader)  # noqa: SLF001
+        message = self.bridge._failure_message(1)  # noqa: SLF001
+        self.assertIn("api_key=[REDACTED]", message)
+        self.assertNotIn("super-secret-value", message)
+
+    async def test_live_startup_is_not_restarted_by_concurrent_request(self) -> None:
         entrypoint = Path(self.temp.name) / "entrypoint-restart"
         entrypoint.write_text("#!/bin/sh\n", encoding="utf-8")
         bridge = LocalSignalBridge(
@@ -174,17 +185,45 @@ class LocalSignalBridgeTests(unittest.IsolatedAsyncioTestCase):
             (),
             {"pid": 12345, "returncode": None, "wait": AsyncMock(return_value=0)},
         )()
-        new_process = type("Process", (), {"pid": 12346, "returncode": None})()
         bridge._process = old_process  # noqa: SLF001
         with (
             patch.object(bridge, "health", AsyncMock(return_value=False)),
+            patch(
+                "app.signal_bridge.asyncio.create_subprocess_exec",
+                AsyncMock(),
+            ) as create,
+            patch("app.signal_bridge.os.killpg") as killpg,
+        ):
+            await bridge.ensure_started()
+        killpg.assert_not_called()
+        create.assert_not_awaited()
+        self.assertIs(bridge._process, old_process)  # noqa: SLF001
+
+    async def test_explicit_restart_replaces_unhealthy_process(self) -> None:
+        entrypoint = Path(self.temp.name) / "entrypoint-explicit-restart"
+        entrypoint.write_text("#!/bin/sh\n", encoding="utf-8")
+        bridge = LocalSignalBridge(
+            base_url="http://127.0.0.1:65534",
+            config_dir=Path(self.temp.name) / "explicit-restart-signal",
+            entrypoint=entrypoint,
+        )
+        old_process = type(
+            "Process",
+            (),
+            {"pid": 12345, "returncode": None, "wait": AsyncMock(return_value=0)},
+        )()
+        new_process = type(
+            "Process", (), {"pid": 12346, "returncode": None, "stdout": None}
+        )()
+        bridge._process = old_process  # noqa: SLF001
+        with (
             patch(
                 "app.signal_bridge.asyncio.create_subprocess_exec",
                 AsyncMock(return_value=new_process),
             ) as create,
             patch("app.signal_bridge.os.killpg") as killpg,
         ):
-            await bridge.ensure_started()
+            await bridge.restart()
         killpg.assert_called_once()
         create.assert_awaited_once()
         self.assertIs(bridge._process, new_process)  # noqa: SLF001

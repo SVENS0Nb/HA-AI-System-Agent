@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import signal
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,8 @@ from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
+
+from .redaction import redact_text
 
 LOGGER = logging.getLogger(__name__)
 LOCAL_SIGNAL_URL = "http://127.0.0.1:8080"
@@ -75,6 +78,8 @@ class LocalSignalBridge:
             )
         )
         self._process: asyncio.subprocess.Process | None = None
+        self._output_task: asyncio.Task[None] | None = None
+        self._output_lines: deque[str] = deque(maxlen=20)
         self._process_lock = asyncio.Lock()
         self._pairing_task: asyncio.Task[None] | None = None
         self._pairing_state = PairingState()
@@ -86,41 +91,64 @@ class LocalSignalBridge:
             if await self.health():
                 return
             if self._process is not None and self._process.returncode is None:
-                LOGGER.warning(
-                    "Integrated Signal bridge process is alive but unhealthy; restarting"
-                )
-                process = self._process
-                self._process = None
+                # The Java JSON-RPC service can need noticeably longer than the
+                # HTTP wrapper to become healthy. Concurrent QR requests join
+                # this startup instead of racing a second process against it.
+                return
+            old_output_task = self._output_task
+            self._process = None
+            self._output_task = None
+            await self._finish_output_task(old_output_task)
+            await self._start_locked()
+
+    async def restart(self) -> None:
+        """Explicitly replace an unhealthy bridge after its startup grace."""
+        await self.cancel_pairing()
+        async with self._process_lock:
+            process = self._process
+            output_task = self._output_task
+            self._process = None
+            self._output_task = None
+            if process is not None:
                 await self._terminate_process(process)
-            if not self.entrypoint.is_file():
-                raise RuntimeError(
-                    "Die integrierte Signal-Bridge ist in diesem Image nicht verfügbar."
-                )
-            self.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(self.config_dir, 0o700)
-            environment = {
-                key: value
-                for key, value in os.environ.items()
-                if key in BRIDGE_ENV_ALLOWLIST
+            await self._finish_output_task(output_task)
+            await self._start_locked()
+
+    async def _start_locked(self) -> None:
+        if not self.entrypoint.is_file():
+            raise RuntimeError(
+                "Die integrierte Signal-Bridge ist in diesem Image nicht verfügbar."
+            )
+        self.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.config_dir, 0o700)
+        environment = {
+            key: value for key, value in os.environ.items() if key in BRIDGE_ENV_ALLOWLIST
+        }
+        environment.update(
+            {
+                "MODE": "json-rpc",
+                "PORT": str(urlsplit(self.base_url).port or 8080),
+                "SIGNAL_CLI_CONFIG_DIR": str(self.config_dir),
+                "SIGNAL_CLI_UID": "1000",
+                "SIGNAL_CLI_GID": "1000",
+                "SIGNAL_CLI_CHOWN_ON_STARTUP": "true",
             }
-            environment.update(
-                {
-                    "MODE": "json-rpc",
-                    "PORT": str(urlsplit(self.base_url).port or 8080),
-                    "SIGNAL_CLI_CONFIG_DIR": str(self.config_dir),
-                    "SIGNAL_CLI_UID": "1000",
-                    "SIGNAL_CLI_GID": "1000",
-                    "SIGNAL_CLI_CHOWN_ON_STARTUP": "true",
-                }
+        )
+        self._output_lines.clear()
+        process = await asyncio.create_subprocess_exec(
+            str(self.entrypoint),
+            env=environment,
+            start_new_session=True,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        self._process = process
+        if process.stdout is not None:
+            self._output_task = asyncio.create_task(
+                self._drain_output(process.stdout),
+                name="signal-bridge-output",
             )
-            self._process = await asyncio.create_subprocess_exec(
-                str(self.entrypoint),
-                env=environment,
-                start_new_session=True,
-            )
-            LOGGER.info(
-                "Integrated Signal bridge started with PID %s", self._process.pid
-            )
+        LOGGER.info("Integrated Signal bridge started with PID %s", process.pid)
 
     async def wait_until_ready(self, timeout_seconds: float = 90) -> None:
         await self.ensure_started()
@@ -128,9 +156,8 @@ class LocalSignalBridge:
         while not await self.health():
             process = self._process
             if process is not None and process.returncode is not None:
-                raise RuntimeError(
-                    f"Die Signal-Bridge wurde mit Status {process.returncode} beendet."
-                )
+                await self._finish_output_task(self._output_task)
+                raise RuntimeError(self._failure_message(process.returncode))
             if asyncio.get_running_loop().time() >= deadline:
                 raise TimeoutError("Die Signal-Bridge wurde nicht rechtzeitig bereit.")
             await asyncio.sleep(1)
@@ -170,6 +197,9 @@ class LocalSignalBridge:
             except Exception as exc:
                 error = f"{type(exc).__name__}: {str(exc)[:200]}"
         process = self._process
+        if not ready and error is None and process is not None:
+            if process.returncode is not None:
+                error = self._failure_message(process.returncode)
         return {
             "ready": ready,
             "accounts": accounts,
@@ -264,9 +294,44 @@ class LocalSignalBridge:
         await self.cancel_pairing()
         async with self._process_lock:
             process = self._process
+            output_task = self._output_task
             self._process = None
+            self._output_task = None
             if process is not None:
                 await self._terminate_process(process)
+            await self._finish_output_task(output_task)
+
+    async def _drain_output(self, reader: asyncio.StreamReader) -> None:
+        while line := await reader.readline():
+            clean = redact_text(
+                re.sub(
+                    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]",
+                    "",
+                    line.decode("utf-8", "replace"),
+                )
+            ).strip()
+            if not clean:
+                continue
+            clean = clean[-500:]
+            self._output_lines.append(clean)
+            LOGGER.info("Signal bridge: %s", clean)
+
+    async def _finish_output_task(self, task: asyncio.Task[None] | None) -> None:
+        if task is None or task is asyncio.current_task():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=2)
+        except TimeoutError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        except Exception:
+            LOGGER.exception("Cannot finish Signal bridge output reader")
+
+    def _failure_message(self, returncode: int) -> str:
+        message = f"Die Signal-Bridge wurde mit Status {returncode} beendet."
+        if self._output_lines:
+            message += f" Letzte Ausgabe: {self._output_lines[-1]}"
+        return message
 
     @staticmethod
     async def _terminate_process(process: asyncio.subprocess.Process) -> None:
