@@ -1,5 +1,5 @@
 name: "HA AI System Agent"
-version: "0.7.3"
+version: "0.8.0"
 slug: "homeassistant_readonly_agent"
 description: >-
   HA AI System Agent with read-only diagnostics, optional confirmed entity control, Signal chat and persistent monitors.
@@ -35,6 +35,7 @@ options:
   signal_api_url: "http://127.0.0.1:8080"
   signal_api_token: ""
   signal_account: ""
+  signal_self_chat_enabled: false
   allowed_senders: []
   timezone: "Europe/Berlin"
   learning_enabled: true
@@ -65,6 +66,7 @@ schema:
   signal_api_url: url
   signal_api_token: password
   signal_account: str
+  signal_self_chat_enabled: bool
   allowed_senders:
     - str
   timezone: str

@@ -4,7 +4,7 @@ const api = path => `${window.location.pathname.replace(/\/?$/, '/')}${path}`;
 const fields = [
   'openai_api_key','openai_model','reasoning_mode','reasoning_effort','openai_timeout_seconds',
   'max_output_tokens','max_tool_rounds','max_parallel_agent_runs','signal_mode',
-  'signal_api_url','signal_api_token','signal_account','timezone',
+  'signal_api_url','signal_api_token','signal_account','signal_self_chat_enabled','timezone',
   'conversation_messages','message_retention_days','max_messages_per_sender',
   'max_monitors_per_sender','reconcile_interval_seconds','default_log_lines',
   'max_config_file_kb','startup_message','learning_enabled','anomaly_sensitivity',
@@ -101,12 +101,21 @@ async function loadSignalStatus() {
       $('signalBridgeMessage').textContent='Jetzt das Bot-Konto per QR-Code verbinden.';
     } else if(accounts.length===1) {
       $('signalBridgeTitle').textContent=`Signal-Konto verbunden: ${accounts[0]}`;
-      $('signalBridgeMessage').textContent=(status.allowed_senders||[]).length?'Mindestens ein Absender ist freigegeben.':'Als Nächstes einen persönlichen Absender koppeln.';
+      const senderCount=(status.allowed_senders||[]).length;
+      const selfChat=Boolean(status.signal_self_chat_enabled);
+      $('signalBridgeMessage').textContent=selfChat&&senderCount
+        ?`„Notiz an mich“ und ${senderCount} weitere Absender sind aktiv.`
+        :(selfChat?'„Notiz an mich“ ist aktiv.':(senderCount?'Mindestens ein Absender ist freigegeben.':'„Notiz an mich“ aktivieren oder einen persönlichen Absender koppeln.'));
       $('signal_account').value=accounts[0];
       if(linkPolling) {
         linkPolling=false;
         $('signalQrPanel').hidden=true;
-        if((status.allowed_senders||[]).length===0) await startPairing();
+        if($('signal_self_chat_enabled').checked) {
+          await request('api/settings',{method:'PUT',headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},body:JSON.stringify({signal_mode:'integrated',signal_account:accounts[0],signal_self_chat_enabled:true})});
+          toast('„Notiz an mich“ wurde für das verbundene Konto aktiviert.');
+          await loadSettings();
+          setTimeout(loadStatus,700);
+        } else if(senderCount===0) await startPairing();
       }
     } else {
       $('signalBridgeTitle').textContent='Mehrere Signal-Konten gefunden';
@@ -180,7 +189,7 @@ $('signalUnlink').addEventListener('click',async()=>{
   try {
     const result=await request('api/signal/unlink',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},body:JSON.stringify({confirmation:'TRENNEN'})});
     $('signalQrPanel').hidden=true; $('signalPairPanel').hidden=true;
-    $('signal_account').value=''; $('allowed_senders').value='';
+    $('signal_account').value=''; $('signal_self_chat_enabled').checked=false; $('allowed_senders').value='';
     toast(result.message); await loadSettings(); setTimeout(loadStatus,700);
   } catch(e) { toast(e.message,true); } finally { setTimeout(loadSignalStatus,500); }
 });

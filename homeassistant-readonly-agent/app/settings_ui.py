@@ -276,6 +276,9 @@ class SettingsUI:
             )
         status["configured_account"] = settings.get("signal_account", "")
         status["allowed_senders"] = settings.get("allowed_senders", [])
+        status["signal_self_chat_enabled"] = settings.get(
+            "signal_self_chat_enabled", False
+        )
         return web.json_response({"ok": True, "status": status})
 
     async def _signal_link(self, request: web.Request) -> web.Response:
@@ -296,7 +299,7 @@ class SettingsUI:
             {
                 "ok": True,
                 "qr_code": f"data:image/png;base64,{base64.b64encode(image).decode('ascii')}",
-                "message": "QR-Code erstellt. Jetzt mit dem Signal-Bot-Konto scannen.",
+                "message": "QR-Code erstellt. Jetzt mit dem gewünschten Signal-Konto scannen.",
             }
         )
 
@@ -351,6 +354,7 @@ class SettingsUI:
                     {
                         "signal_mode": "integrated",
                         "signal_account": "",
+                        "signal_self_chat_enabled": False,
                         "allowed_senders": [],
                     }
                 )
@@ -447,13 +451,18 @@ class SettingsUI:
     @staticmethod
     async def _test_signal(settings: Any) -> str:
         timeout = aiohttp.ClientTimeout(total=30)
-        recipient = sorted(settings.allowed_senders)[0]
+        recipient = (
+            settings.signal_account
+            if settings.signal_self_chat_enabled
+            else sorted(settings.allowed_senders)[0]
+        )
         async with aiohttp.ClientSession(timeout=timeout) as session:
             client = SignalClient(
                 base_url=settings.signal_api_url,
                 account=settings.signal_account,
                 api_token=settings.signal_api_token,
                 allowed_senders=settings.allowed_senders,
+                self_chat_enabled=settings.signal_self_chat_enabled,
                 session=session,
             )
             await client.send(

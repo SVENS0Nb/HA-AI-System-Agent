@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0
+
+- Optionaler, standardmäßig deaktivierter Signal-Modus für den eigenen Chat „Notiz an mich“
+- Selbst-Chat und ausdrücklich erlaubte externe Absender können gleichzeitig verwendet werden
+- Strikte Trennung von eigenen Notizen und sonstigen ausgehenden Unterhaltungen anhand des Signal-Synchronisationsziels
+- Gekennzeichnete Agentenantworten werden beim Empfang verworfen und verhindern dauerhafte Antwortschleifen
+- Start-, Test-, Monitor- und Anomaliebenachrichtigungen berücksichtigen den aktivierten Selbst-Chat
+- UI-Onboarding speichert das per QR-Code erkannte persönliche Konto automatisch, wenn der Selbst-Chat ausgewählt wurde
+
 ## 0.7.3
 
 - Speicherschonender nativer Signal-JSON-RPC-Daemon ohne dauerhaft laufende Java-VM

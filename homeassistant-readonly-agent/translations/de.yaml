@@ -19,8 +19,11 @@ configuration:
     name: Signal-Proxy-Token
     description: Optionaler Bearer-Token eines vorgeschalteten Auth-Proxys.
   signal_account:
-    name: Signal-Bot-Nummer
+    name: Signal-Kontonummer
     description: Wird im integrierten Modus nach dem QR-Scan automatisch erkannt.
+  signal_self_chat_enabled:
+    name: Eigenen Chat „Notiz an mich“ verwenden
+    description: Verarbeitet zusätzlich eindeutig an die eigene Nummer adressierte Selbstnachrichten; standardmäßig ausgeschaltet.
   allowed_senders:
     name: Erlaubte Signal-Absender
   timezone:

@@ -4,11 +4,11 @@ Dieses Add-on verbindet einen überwiegend auf Nur-Lese-Werkzeuge begrenzten Ope
 
 ## Vor dem Start
 
-1. Einen OpenAI-API-Key und sinnvollerweise ein eigenes Signal-Konto für den Bot bereithalten.
+1. Einen OpenAI-API-Key bereithalten. Empfohlen ist ein eigenes Signal-Konto; alternativ kann das persönliche Konto ausschließlich über „Notiz an mich“ genutzt werden.
 2. Das Add-on starten und **Weboberfläche öffnen** wählen.
 3. Unter Signal **Integriert – automatisch** auswählen und **Signal-Konto verbinden** anklicken.
-4. Den QR-Code in der Signal-App des Bot-Kontos unter **Einstellungen → Verknüpfte Geräte** scannen.
-5. Den angezeigten `KOPPELN …`-Befehl vom persönlichen Signal-Konto an den Bot senden.
+4. Den QR-Code in der Signal-App des gewünschten Kontos unter **Einstellungen → Verknüpfte Geräte** scannen.
+5. Entweder **Eigenen Chat „Notiz an mich“ verwenden** aktivieren oder den angezeigten `KOPPELN …`-Befehl von einem anderen Signal-Konto senden. Beide Wege können gleichzeitig aktiv sein.
 6. OpenAI-Key speichern und die drei Verbindungstests ausführen.
 
 Die **Reasoning-Steuerung** steht standardmäßig auf **Automatisch – je nach Aufgabe**. Kurze Statusfragen verwenden `none` oder `low`, Monitoraufträge und Diagnosen mindestens `medium`, und umfangreiche Ursachen- oder Konfigurationsanalysen `high`. Die Einstufung erfolgt lokal ohne einen zusätzlichen OpenAI-Aufruf. Unter **Feste Stufe** kann dieses Verhalten bei Bedarf deaktiviert werden.
@@ -22,6 +22,8 @@ Eine unvollständige Konfiguration ist zulässig: Dann bleibt der Agent pausiert
 Der Signal-Wrapper ist ein inoffizielles Community-Projekt. Seine integrierte HTTP-Schnittstelle ist ausschließlich über Loopback im Add-on erreichbar und veröffentlicht keinen Port. Eine eigene externe Bridge bleibt als Expertenmodus verfügbar.
 
 Die Signal-Geräteschlüssel liegen persistent unter `/data/signal-cli`. Dadurch übersteht die Verknüpfung Neustarts; Home-Assistant-Backups mit diesen Daten müssen vertraulich gespeichert werden.
+
+Der Selbst-Chat ist standardmäßig deaktiviert. Bei Aktivierung akzeptiert der Agent nur `syncMessage`-Nachrichten, die eindeutig vom verbundenen Konto an genau dieses Konto adressiert sind. Ausgehende Agentenantworten werden gekennzeichnet und beim Empfang verworfen, um Antwortschleifen auch nach einem Neustart zu verhindern. Normale Nachrichten bleiben unabhängig davon auf ausdrücklich erlaubte Absender begrenzt.
 
 ## Grenzen
 

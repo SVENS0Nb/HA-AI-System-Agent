@@ -103,6 +103,7 @@ class SettingsUIAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('src="ui.js"', html)
         self.assertIn("HA AI System Agent", html)
         self.assertIn('<select id="timezone">', html)
+        self.assertIn('id="signal_self_chat_enabled"', html)
         self.assertNotIn("<script>", html)
         self.assertNotIn("unsafe-inline", response.headers["Content-Security-Policy"])
         self.assertEqual((await self.client.get("/ui.css")).status, 200)
@@ -119,6 +120,7 @@ class SettingsUIAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["settings"]["learning_enabled"])
         self.assertEqual(payload["settings"]["anomaly_sensitivity"], "balanced")
         self.assertFalse(payload["settings"]["entity_control_enabled"])
+        self.assertFalse(payload["settings"]["signal_self_chat_enabled"])
         self.assertEqual(payload["settings"]["controllable_entities"], [])
         denied = await self.client.put("/api/settings", json={"openai_model": "new"})
         self.assertEqual(denied.status, 403)
@@ -165,6 +167,7 @@ class SettingsUIAPITests(unittest.IsolatedAsyncioTestCase):
         status = await (await self.client.get("/api/signal/status")).json()
         self.assertTrue(status["status"]["ready"])
         self.assertEqual(status["status"]["accounts"], ["+49123456789"])
+        self.assertFalse(status["status"]["signal_self_chat_enabled"])
 
         denied = await self.client.post("/api/signal/link")
         self.assertEqual(denied.status, 403)
@@ -203,5 +206,6 @@ class SettingsUIAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unlinked.status, 200)
         settings = (await (await self.client.get("/api/settings")).json())["settings"]
         self.assertEqual(settings["signal_account"], "")
+        self.assertFalse(settings["signal_self_chat_enabled"])
         self.assertEqual(settings["allowed_senders"], [])
         self.assertEqual(self.bridge.removed_account, "+49123456789")

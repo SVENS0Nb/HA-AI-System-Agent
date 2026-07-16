@@ -31,6 +31,7 @@ class Settings:
     signal_api_url: str
     signal_api_token: str
     signal_account: str
+    signal_self_chat_enabled: bool
     allowed_senders: frozenset[str]
     timezone: str
     learning_enabled: bool
@@ -84,6 +85,10 @@ class Settings:
                 else str(options.get("signal_api_token", "")).strip()
             ),
             signal_account=str(options.get("signal_account", "")).strip(),
+            signal_self_chat_enabled=cls._bool(
+                options.get("signal_self_chat_enabled", False),
+                "signal_self_chat_enabled",
+            ),
             allowed_senders=senders,
             timezone=str(options.get("timezone", "Europe/Berlin")),
             learning_enabled=cls._bool(
@@ -149,6 +154,14 @@ class Settings:
         if not isinstance(value, bool):
             raise TypeError(f"{name} muss true oder false sein")
         return value
+
+    @property
+    def signal_recipients(self) -> frozenset[str]:
+        """Return every explicitly enabled Signal conversation."""
+        recipients = set(self.allowed_senders)
+        if self.signal_self_chat_enabled and self.signal_account:
+            recipients.add(self.signal_account)
+        return frozenset(recipients)
 
     @staticmethod
     def _signal_mode(options: dict[str, Any]) -> str:
@@ -250,13 +263,13 @@ class Settings:
             errors.append("Signal-Konto ist noch nicht per QR-Code verbunden.")
         elif not e164.fullmatch(self.signal_account):
             errors.append(
-                "Signal-Bot-Nummer muss im E.164-Format vorliegen, z. B. +49123456789."
+                "Signal-Kontonummer muss im E.164-Format vorliegen, z. B. +49123456789."
             )
-        if not self.allowed_senders:
+        if not self.allowed_senders and not self.signal_self_chat_enabled:
             errors.append(
-                "Noch kein persönlicher Signal-Absender gekoppelt."
+                "Weder „Notiz an mich“ noch ein persönlicher Signal-Absender ist aktiviert."
                 if self.signal_mode == "integrated"
-                else "Mindestens ein erlaubter Signal-Absender ist erforderlich."
+                else "„Notiz an mich“ oder mindestens ein erlaubter Signal-Absender ist erforderlich."
             )
         elif invalid := sorted(
             sender for sender in self.allowed_senders if not e164.fullmatch(sender)
@@ -264,7 +277,7 @@ class Settings:
             errors.append(f"Ungültige erlaubte Signal-Nummern: {', '.join(invalid)}")
         if self.signal_account and self.signal_account in self.allowed_senders:
             errors.append(
-                "Die Signal-Bot-Nummer darf nicht zugleich als erlaubter Absender eingetragen sein."
+                "Die Signal-Kontonummer darf nicht zugleich als erlaubter Absender eingetragen sein; dafür „Notiz an mich“ aktivieren."
             )
         return errors
 
@@ -293,6 +306,7 @@ class SettingsStore:
         "signal_api_url",
         "signal_api_token",
         "signal_account",
+        "signal_self_chat_enabled",
         "allowed_senders",
         "timezone",
         "learning_enabled",
@@ -333,6 +347,7 @@ class SettingsStore:
         "startup_message",
         "learning_enabled",
         "entity_control_enabled",
+        "signal_self_chat_enabled",
     }
     INTEGER_FIELDS = {
         "conversation_messages",
@@ -404,6 +419,10 @@ class SettingsStore:
         )
         result["entity_control_enabled"] = Settings._bool(
             values.get("entity_control_enabled", False), "entity_control_enabled"
+        )
+        result["signal_self_chat_enabled"] = Settings._bool(
+            values.get("signal_self_chat_enabled", False),
+            "signal_self_chat_enabled",
         )
         result["controllable_entities"] = sorted(
             Settings._controllable_entities(values)
