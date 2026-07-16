@@ -9,16 +9,22 @@ from collections import defaultdict
 import aiohttp
 
 from .agent import HomeAssistantAgent
+from .behavior import BehaviorLearningService
 from .config import ConfigurationError, Settings, SettingsStore
 from .config_reader import ConfigReader
 from .ha_client import HomeAssistantReadClient
 from .monitors import MonitorService
 from .settings_ui import SettingsUI
+from .signal_bridge import LocalSignalBridge
 from .signal_client import SignalClient
 from .storage import Storage
 from .tools import ToolRegistry
 
 LOGGER = logging.getLogger(__name__)
+
+
+class ConfirmationError(RuntimeError):
+    """A confirmation token was invalid, spent, or has an uncertain outcome."""
 
 
 async def handle_signal_message(
@@ -30,7 +36,12 @@ async def handle_signal_message(
     """Handle confirmations in code; only normal chat reaches the model."""
     confirmation = re.fullmatch(r"(?i)BESTÄTIGEN\s+([0-9a-f]{8})", message.strip())
     if confirmation:
-        result = await registry.confirm_action(sender, confirmation.group(1).lower())
+        try:
+            result = await registry.confirm_action(
+                sender, confirmation.group(1).lower()
+            )
+        except (KeyError, RuntimeError) as exc:
+            raise ConfirmationError(str(exc)) from exc
         monitor_id = (
             result.get("id") or result.get("monitor_id")
             if isinstance(result, dict)
@@ -50,12 +61,15 @@ async def run_agent_runtime(
     *,
     announce: bool,
     announcement_done: asyncio.Event | None = None,
+    signal_bridge: LocalSignalBridge | None = None,
 ) -> None:
     storage = Storage(
         settings.data_dir / "agent.sqlite3",
         retention_days=settings.message_retention_days,
         max_messages_per_sender=settings.max_messages_per_sender,
         max_monitors_per_sender=settings.max_monitors_per_sender,
+        memory_retention_days=settings.memory_retention_days,
+        max_memories_per_sender=settings.max_memories_per_sender,
     )
     timeout = aiohttp.ClientTimeout(total=90, connect=20, sock_read=None)
     try:
@@ -67,7 +81,7 @@ async def run_agent_runtime(
                 api_token=settings.signal_api_token,
                 allowed_senders=settings.allowed_senders,
                 session=session,
-                claim_message=storage.claim_signal_message,
+                claim_message=storage.receive_signal_message,
             )
             monitors = MonitorService(
                 storage,
@@ -85,14 +99,19 @@ async def run_agent_runtime(
                 storage=storage,
                 monitors=monitors,
                 default_log_lines=settings.default_log_lines,
+                learning_enabled=settings.learning_enabled,
+                entity_control_enabled=settings.entity_control_enabled,
+                controllable_entities=settings.controllable_entities,
             )
             agent = HomeAssistantAgent(
                 api_key=settings.openai_api_key,
                 model=settings.openai_model,
+                reasoning_mode=settings.reasoning_mode,
                 reasoning_effort=settings.reasoning_effort,
                 tools=registry,
                 storage=storage,
                 conversation_messages=settings.conversation_messages,
+                learning_enabled=settings.learning_enabled,
                 openai_timeout_seconds=settings.openai_timeout_seconds,
                 max_output_tokens=settings.max_output_tokens,
                 max_tool_rounds=settings.max_tool_rounds,
@@ -105,6 +124,54 @@ async def run_agent_runtime(
 
             monitors.set_run_callback(on_monitor)
 
+            behavior: BehaviorLearningService | None = None
+            if settings.learning_enabled:
+                behavior = BehaviorLearningService(
+                    storage,
+                    ha,
+                    sensitivity=settings.anomaly_sensitivity,
+                )
+
+                async def on_behavior_anomaly(anomaly: dict) -> None:
+                    failed: list[str] = []
+                    recipients = await asyncio.to_thread(
+                        storage.pending_anomaly_recipients,
+                        str(anomaly["id"]),
+                        settings.allowed_senders,
+                    )
+                    for recipient in recipients:
+                        try:
+                            message = await agent.learned_anomaly(recipient, anomaly)
+                            await signal_client.send(recipient, message)
+                        except Exception as exc:
+                            LOGGER.exception(
+                                "Cannot deliver learned anomaly %s to %s",
+                                anomaly.get("id"),
+                                recipient,
+                            )
+                            await asyncio.to_thread(
+                                storage.mark_anomaly_recipient_failed,
+                                str(anomaly["id"]),
+                                recipient,
+                                f"{type(exc).__name__}: {exc}",
+                            )
+                            failed.append(recipient)
+                        else:
+                            await asyncio.to_thread(
+                                storage.mark_anomaly_recipient_delivered,
+                                str(anomaly["id"]),
+                                recipient,
+                            )
+                    if failed:
+                        raise RuntimeError(
+                            "Learned anomaly notification remains pending for: "
+                            + ", ".join(failed)
+                        )
+
+                behavior.set_alert_callback(on_behavior_anomaly)
+                monitors.set_state_observer(behavior.observe_state_event)
+                await behavior.start()
+
             async def announce_startup() -> None:
                 pending = set(settings.allowed_senders)
                 delay = 2
@@ -113,7 +180,8 @@ async def run_agent_runtime(
                         try:
                             await signal_client.send(
                                 recipient,
-                                "Home Assistant Read-only Agent ist gestartet. Home Assistant bleibt schreibgeschützt.",
+                                "HA AI System Agent ist gestartet. Konfiguration und System bleiben schreibgeschützt; "
+                                f"Gerätesteuerung ist {'aktiv' if settings.entity_control_enabled else 'aus'}.",
                             )
                         except Exception as exc:
                             LOGGER.warning(
@@ -127,45 +195,110 @@ async def run_agent_runtime(
                 if announcement_done is not None:
                     announcement_done.set()
 
-            queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=100)
+            SignalQueueItem = tuple[str, str, str, str | None, int]
+            queue: asyncio.Queue[SignalQueueItem] = asyncio.Queue(
+                maxsize=storage.MAX_PENDING_SIGNAL_MESSAGES
+            )
+            for item in storage.pending_signal_messages():
+                queue.put_nowait(
+                    (
+                        str(item["digest"]),
+                        str(item["sender"]),
+                        str(item["message"]),
+                        str(item["reply"]) if item["reply"] is not None else None,
+                        int(item["attempts"]),
+                    )
+                )
 
             async def receive_signal() -> None:
-                async for sender, message in signal_client.messages():
+                async for digest, sender, message in signal_client.messages():
                     if message:
-                        await queue.put((sender, message))
+                        await queue.put((digest, sender, message, None, 0))
 
             sender_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+            background_tasks: set[asyncio.Task[None]] = set()
 
             async def process_signal() -> None:
                 while True:
-                    sender, message = await queue.get()
+                    digest, sender, message, reply, attempts = await queue.get()
                     try:
-                        async with sender_locks[sender]:
-                            reply = await handle_signal_message(
-                                sender, message, registry, agent
-                            )
-                    except KeyError as exc:
-                        reply = f"Bestätigung nicht möglich: {exc}."
-                    except Exception as exc:
-                        LOGGER.exception("Agent request failed")
-                        reply = f"Die Anfrage ist fehlgeschlagen: {type(exc).__name__}. Details stehen im Add-on-Log."
-                    try:
+                        if reply is None:
+                            try:
+                                async with sender_locks[sender]:
+                                    generated_reply = await handle_signal_message(
+                                        sender, message, registry, agent
+                                    )
+                            except ConfirmationError as exc:
+                                generated_reply = (
+                                    f"Bestätigung nicht möglich: {exc}."
+                                )
+                            except Exception as exc:
+                                LOGGER.exception("Agent request failed")
+                                generated_reply = (
+                                    "Die Anfrage ist fehlgeschlagen: "
+                                    f"{type(exc).__name__}. Details stehen im Add-on-Log."
+                                )
+                            storage.set_signal_reply(digest, generated_reply)
+                            reply = generated_reply
                         await signal_client.send(sender, reply)
+                        storage.mark_signal_delivered(digest)
+                    except asyncio.CancelledError:
+                        raise
                     except Exception:
-                        LOGGER.exception("Cannot send Signal reply")
+                        LOGGER.exception(
+                            "Cannot complete durable Signal reply %s", digest[:8]
+                        )
+                        try:
+                            attempts = storage.mark_signal_delivery_failed(digest)
+                        except Exception:
+                            LOGGER.exception(
+                                "Cannot update Signal delivery attempt %s", digest[:8]
+                            )
+                            attempts += 1
+                        await asyncio.sleep(min(2 ** min(attempts, 8), 300))
+                        await queue.put(
+                            (digest, sender, message, reply, attempts),
+                        )
                     finally:
                         queue.task_done()
+
+            async def housekeeping() -> None:
+                while True:
+                    await asyncio.sleep(3600)
+                    await asyncio.to_thread(storage.prune)
+
+            async def supervise_signal_bridge() -> None:
+                if signal_bridge is None:
+                    return
+                while True:
+                    await asyncio.sleep(15)
+                    if await signal_bridge.health():
+                        continue
+                    LOGGER.warning("Integrated Signal bridge is unhealthy; recovering")
+                    try:
+                        await signal_bridge.wait_until_ready()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        LOGGER.exception("Integrated Signal bridge recovery failed")
+                        await asyncio.sleep(15)
 
             core_tasks = {
                 asyncio.create_task(monitors.start(), name="ha-event-monitor"),
                 asyncio.create_task(receive_signal(), name="signal-receiver"),
+                asyncio.create_task(housekeeping(), name="storage-housekeeping"),
                 asyncio.create_task(shutdown_event.wait(), name="runtime-shutdown"),
             }
+            if signal_bridge is not None:
+                core_tasks.add(
+                    asyncio.create_task(
+                        supervise_signal_bridge(), name="signal-bridge-supervisor"
+                    )
+                )
             for index in range(settings.max_parallel_agent_runs):
                 core_tasks.add(
                     asyncio.create_task(process_signal(), name=f"signal-worker-{index}")
                 )
-            background_tasks: set[asyncio.Task[None]] = set()
             if announce and settings.startup_message:
                 background_tasks.add(
                     asyncio.create_task(announce_startup(), name="startup-announcement")
@@ -189,6 +322,8 @@ async def run_agent_runtime(
                     *(core_tasks | background_tasks), return_exceptions=True
                 )
                 await monitors.stop()
+                if behavior is not None:
+                    await behavior.stop()
                 await agent.client.close()
     finally:
         storage.close()
@@ -213,6 +348,7 @@ async def wait_for_change_or_stop(
 
 async def run() -> None:
     store = SettingsStore()
+    signal_bridge = LocalSignalBridge()
     reload_event = asyncio.Event()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -222,7 +358,7 @@ async def run() -> None:
         except NotImplementedError:
             pass
 
-    ui = SettingsUI(store, reload_event)
+    ui = SettingsUI(store, reload_event, signal_bridge=signal_bridge)
     await ui.start()
     LOGGER.info("Settings UI listening on Home Assistant ingress port 8099")
     announcement_done = asyncio.Event()
@@ -235,6 +371,16 @@ async def run() -> None:
             except ConfigurationError as exc:
                 errors = [str(exc)]
                 settings = None
+
+            if settings is not None and settings.signal_mode == "integrated":
+                try:
+                    await signal_bridge.wait_until_ready()
+                except Exception as exc:
+                    errors.append(
+                        f"Integrierte Signal-Bridge konnte nicht starten: {type(exc).__name__}: {exc}"
+                    )
+            elif settings is not None:
+                await signal_bridge.stop()
 
             if errors or settings is None:
                 ui.set_status(running=False, messages=errors)
@@ -253,6 +399,9 @@ async def run() -> None:
                     runtime_stop,
                     announce=not announcement_done.is_set(),
                     announcement_done=announcement_done,
+                    signal_bridge=(
+                        signal_bridge if settings.signal_mode == "integrated" else None
+                    ),
                 ),
                 name="agent-runtime",
             )
@@ -260,7 +409,7 @@ async def run() -> None:
                 running=True,
                 messages=[
                     "Agentprozess ist aktiv; Verbindungen können unten einzeln getestet werden.",
-                    f"Modell: {settings.openai_model}; Zeitzone: {settings.timezone}",
+                    f"Modell: {settings.openai_model}; Reasoning: {settings.reasoning_mode if settings.reasoning_mode == 'auto' else settings.reasoning_effort}; Lernen: {'aktiv' if settings.learning_enabled else 'aus'}; Gerätesteuerung: {'aktiv' if settings.entity_control_enabled else 'aus'}; Zeitzone: {settings.timezone}; Signal: {settings.signal_mode}",
                 ],
             )
             reload_waiter = asyncio.create_task(reload_event.wait())
@@ -295,11 +444,13 @@ async def run() -> None:
                 ui.set_status(
                     running=False,
                     messages=[f"Agent-Laufzeitfehler: {error_message}"],
+                    runtime_failed=True,
                 )
                 if await wait_for_change_or_stop(reload_event, stop_event) == "stop":
                     break
     finally:
         await ui.stop()
+        await signal_bridge.stop()
 
 
 def main() -> None:

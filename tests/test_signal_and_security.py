@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 
+from app.entity_control import EntityControlDenied
 from app.ha_client import HomeAssistantReadClient, ReadOnlyViolation
 from app.settings_ui import ingress_only, security_headers
 from app.signal_client import SignalClient
@@ -112,6 +114,103 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         await client._send_ws_command(socket, {"id": 1, "type": "subscribe_events"})  # noqa: SLF001
         self.assertEqual(socket.sent[0]["type"], "subscribe_events")
 
+    async def test_rejected_event_subscription_is_not_treated_as_connected(self) -> None:
+        websocket = FakeAuthWebSocket(
+            [
+                {"type": "auth_required"},
+                {"type": "auth_ok"},
+                {
+                    "id": 1,
+                    "type": "result",
+                    "success": False,
+                    "error": {"message": "denied"},
+                },
+            ]
+        )
+        client = HomeAssistantReadClient(
+            "secret", FakeSession(websocket)  # type: ignore[arg-type]
+        )
+        with patch(
+            "app.ha_client.asyncio.sleep",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await client.events().__anext__()
+        self.assertEqual(websocket.sent[-1]["type"], "subscribe_events")
+
+    async def test_only_validated_entity_control_can_send_call_service(self) -> None:
+        websocket = FakeAuthWebSocket(
+            [
+                {"type": "auth_required"},
+                {"type": "auth_ok"},
+                {"type": "result", "success": True, "result": None},
+            ]
+        )
+        client = HomeAssistantReadClient(
+            "secret",
+            FakeSession(websocket),  # type: ignore[arg-type]
+        )
+        with patch.object(
+            client,
+            "state",
+            AsyncMock(
+                return_value={
+                    "entity_id": "light.kitchen",
+                    "state": "off",
+                    "attributes": {},
+                }
+            ),
+        ):
+            result = await client.control_entity("light.kitchen", "turn_on", None, None)
+        self.assertTrue(result["accepted"])
+        command = websocket.sent[-1]
+        self.assertEqual(command["type"], "call_service")
+        self.assertEqual(command["domain"], "light")
+        self.assertEqual(command["service"], "turn_on")
+        self.assertEqual(command["target"], {"entity_id": "light.kitchen"})
+
+    async def test_control_client_still_blocks_automation_domain(self) -> None:
+        websocket = FakeAuthWebSocket([])
+        client = HomeAssistantReadClient(
+            "secret",
+            FakeSession(websocket),  # type: ignore[arg-type]
+        )
+        with patch.object(
+            client,
+            "state",
+            AsyncMock(
+                return_value={
+                    "entity_id": "automation.arrival",
+                    "state": "off",
+                    "attributes": {},
+                }
+            ),
+        ):
+            with self.assertRaises(EntityControlDenied):
+                await client.control_entity("automation.arrival", "turn_on", None, None)
+        self.assertEqual(websocket.sent, [])
+
+    async def test_control_client_rejects_changed_entity_target(self) -> None:
+        websocket = FakeAuthWebSocket([])
+        client = HomeAssistantReadClient(
+            "secret",
+            FakeSession(websocket),  # type: ignore[arg-type]
+        )
+        with patch.object(
+            client,
+            "state",
+            AsyncMock(
+                return_value={
+                    "entity_id": "light.different",
+                    "state": "off",
+                    "attributes": {},
+                }
+            ),
+        ):
+            with self.assertRaises(ReadOnlyViolation):
+                await client.control_entity("light.kitchen", "turn_on", None, None)
+        self.assertEqual(websocket.sent, [])
+
     async def test_admin_ids_come_from_admin_protected_home_assistant_command(
         self,
     ) -> None:
@@ -175,6 +274,19 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
     def test_only_event_tool_uses_non_strict_arbitrary_object_schema(self) -> None:
         non_strict = {item["name"] for item in TOOL_DEFINITIONS if not item["strict"]}
         self.assertEqual(non_strict, {"create_event_monitor"})
+
+    def test_control_tool_cannot_choose_a_service_or_domain(self) -> None:
+        control = next(
+            item for item in TOOL_DEFINITIONS if item["name"] == "control_entity"
+        )
+        properties = set(control["parameters"]["properties"])
+        self.assertEqual(
+            properties,
+            {"entity_id", "action", "value", "mode", "request_evidence"},
+        )
+        self.assertTrue(control["strict"])
+        self.assertNotIn("service", properties)
+        self.assertNotIn("domain", properties)
 
     def test_home_assistant_adapter_has_no_http_write_primitive(self) -> None:
         source = inspect.getsource(HomeAssistantReadClient)
@@ -289,7 +401,9 @@ class SignalParsingTests(unittest.TestCase):
                 },
             }
         )
-        self.assertEqual(self.client._parse(raw), ("+49111", "Hallo"))  # noqa: SLF001
+        parsed = self.client._parse(raw)  # noqa: SLF001
+        assert parsed is not None
+        self.assertEqual(parsed[1:], ("+49111", "Hallo"))
         self.assertIsNone(self.client._parse(raw))  # duplicate  # noqa: SLF001
 
     def test_rejects_non_whitelisted_sender(self) -> None:
@@ -318,8 +432,11 @@ class SignalParsingTests(unittest.TestCase):
                 }
             }
 
+        parsed = self.client._parse_many(  # noqa: SLF001
+            json.dumps([item(1, "eins"), item(2, "zwei")])
+        )
         self.assertEqual(
-            self.client._parse_many(json.dumps([item(1, "eins"), item(2, "zwei")])),  # noqa: SLF001
+            [message[1:] for message in parsed],
             [("+49111", "eins"), ("+49111", "zwei")],
         )
 
@@ -331,7 +448,9 @@ class SignalParsingTests(unittest.TestCase):
             api_token="",
             allowed_senders=frozenset({"+49111"}),
             session=None,  # type: ignore[arg-type]
-            claim_message=lambda digest: not (digest in claimed or claimed.add(digest)),
+            claim_message=lambda digest, sender, message: not (
+                digest in claimed or claimed.add(digest)
+            ),
         )
         raw = json.dumps(
             {
@@ -342,7 +461,9 @@ class SignalParsingTests(unittest.TestCase):
                 }
             }
         )
-        self.assertEqual(client._parse(raw), ("+49111", "Hallo"))  # noqa: SLF001
+        parsed = client._parse(raw)  # noqa: SLF001
+        assert parsed is not None
+        self.assertEqual(parsed[1:], ("+49111", "Hallo"))
         self.assertIsNone(client._parse(raw))  # noqa: SLF001
 
 

@@ -11,15 +11,16 @@ from app.storage import Storage
 
 
 class FakeResponses:
-    def __init__(self) -> None:
+    def __init__(self, tool_name: str = "get_entity_state") -> None:
         self.requests: list[dict[str, Any]] = []
+        self.tool_name = tool_name
 
     async def create(self, **kwargs: Any) -> Any:
         self.requests.append(kwargs)
         if len(self.requests) == 1:
             call = SimpleNamespace(
                 type="function_call",
-                name="get_entity_state",
+                name=self.tool_name,
                 arguments='{"entity_id":"sensor.test"}',
                 call_id="call-1",
             )
@@ -46,8 +47,9 @@ class FakeRegistry:
         *,
         sender: str,
         allow_monitor_changes: bool,
+        trusted_user_message: str | None = None,
     ) -> Any:
-        del sender
+        del sender, trusted_user_message
         self.calls.append((name, arguments, allow_monitor_changes))
         return {"entity_id": "sensor.test", "state": "online"}
 
@@ -88,16 +90,56 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.responses.requests[0]["store"])
         self.assertEqual(self.responses.requests[0]["max_output_tokens"], 1800)
         self.assertFalse(self.responses.requests[0]["parallel_tool_calls"])
+        self.assertEqual(self.responses.requests[0]["reasoning"]["effort"], "none")
 
     async def test_proactive_run_disables_monitor_changes(self) -> None:
         self.responses = FakeResponses()
         self.agent.client = SimpleNamespace(responses=self.responses)  # type: ignore[assignment]
         await self.agent.proactive(
             {"name": "Test", "task": "Check", "recipient": "+49111"},
-            {"trigger": "cron"},
+            {
+                "trigger": "cron",
+                "untrusted": "root cause config error security audit",
+            },
         )
         self.assertFalse(self.registry.definition_modes[-1])
         self.assertFalse(self.registry.calls[-1][2])
+        self.assertEqual(self.responses.requests[0]["reasoning"]["effort"], "medium")
+
+    async def test_heavy_tool_escalates_followup_without_classifier_request(
+        self,
+    ) -> None:
+        self.responses = FakeResponses(tool_name="read_core_logs")
+        self.agent.client = SimpleNamespace(responses=self.responses)  # type: ignore[assignment]
+        await self.agent.chat("+49111", "Was ist los?")
+        self.assertEqual(len(self.responses.requests), 2)
+        self.assertEqual(self.responses.requests[0]["reasoning"]["effort"], "low")
+        self.assertEqual(self.responses.requests[1]["reasoning"]["effort"], "medium")
+
+    async def test_fixed_reasoning_mode_preserves_manual_effort(self) -> None:
+        self.agent.reasoning_mode = "fixed"
+        self.agent.reasoning_effort = "xhigh"
+        await self.agent.chat("+49111", "Hallo")
+        self.assertTrue(self.responses.requests)
+        self.assertTrue(
+            all(
+                request["reasoning"]["effort"] == "xhigh"
+                for request in self.responses.requests
+            )
+        )
+
+    async def test_durable_memory_is_added_to_instructions(self) -> None:
+        self.storage.add_memory(
+            owner="+49111",
+            content="Die Gartenpumpe darf montags länger laufen.",
+            category="normal_behavior",
+            importance=4,
+            ttl_days=365,
+        )
+        await self.agent.chat("+49111", "Ist die Gartenpumpe normal?")
+        instructions = self.responses.requests[0]["instructions"]
+        self.assertIn("Gartenpumpe darf montags länger laufen", instructions)
+        self.assertIn("not higher-priority instructions", instructions)
 
 
 if __name__ == "__main__":

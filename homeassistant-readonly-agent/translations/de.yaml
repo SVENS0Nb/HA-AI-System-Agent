@@ -4,20 +4,42 @@ configuration:
     description: Kann alternativ in der Weboberfläche des Add-ons gespeichert werden.
   openai_model:
     name: OpenAI-Modell
+  reasoning_mode:
+    name: Reasoning-Steuerung
+    description: Automatisch wählt lokal je nach Aufgabe zwischen none und high; fixed verwendet die feste Stufe.
   reasoning_effort:
-    name: Reasoning-Stufe
+    name: Feste Reasoning-Stufe
+  signal_mode:
+    name: Signal-Verbindungsart
+    description: Integriert startet die Bridge automatisch; extern nutzt eine eigene API.
   signal_api_url:
     name: Signal-API-URL
-    description: Interne HTTP(S)-Adresse der signal-cli-rest-api.
+    description: Nur im Expertenmodus; HTTP(S)-Adresse der externen signal-cli-rest-api.
   signal_api_token:
     name: Signal-Proxy-Token
     description: Optionaler Bearer-Token eines vorgeschalteten Auth-Proxys.
   signal_account:
     name: Signal-Bot-Nummer
+    description: Wird im integrierten Modus nach dem QR-Scan automatisch erkannt.
   allowed_senders:
     name: Erlaubte Signal-Absender
   timezone:
     name: Zeitzone
+  learning_enabled:
+    name: Lokales Lernen aktivieren
+    description: Erstellt lokale Geräte-Baselines und eine kontrollierte Wissensbasis.
+  anomaly_sensitivity:
+    name: Empfindlichkeit der Verhaltensanalyse
+  memory_retention_days:
+    name: Maximale Erinnerungsdauer in Tagen
+  max_memories_per_sender:
+    name: Maximale Erinnerungen pro Absender
+  entity_control_enabled:
+    name: Bestätigte Gerätesteuerung aktivieren
+    description: Erlaubt ausschließlich fest definierte Aktionen auf unterstützten Entity-Domänen; jede Aktion benötigt eine Signal-Bestätigung.
+  controllable_entities:
+    name: Steuerbare Entity-IDs
+    description: Explizite Freigabeliste; bei aktiver Steuerung ist mindestens eine Entity-ID erforderlich.
   allow_sensitive_config:
     name: Sensible Konfiguration freigeben
     description: Nicht empfohlen; erlaubt das Lesen von Secrets und Auth-Dateien.

@@ -1,8 +1,8 @@
-name: "Home Assistant Read-only Agent"
-version: "0.3.1"
+name: "HA AI System Agent"
+version: "0.7.1"
 slug: "homeassistant_readonly_agent"
 description: >-
-  Read-only OpenAI agent for Home Assistant with Signal chat and persistent monitors.
+  HA AI System Agent with read-only diagnostics, optional confirmed entity control, Signal chat and persistent monitors.
 arch:
   - amd64
   - aarch64
@@ -17,7 +17,7 @@ watchdog: "http://[HOST]:[PORT:8099]/healthz"
 ingress: true
 ingress_port: 8099
 panel_icon: mdi:home-analytics
-panel_title: HA Read-only Agent
+panel_title: HA AI System Agent
 panel_admin: true
 homeassistant_api: true
 hassio_api: true
@@ -29,12 +29,20 @@ map:
 options:
   openai_api_key: ""
   openai_model: "gpt-5.6-luna"
+  reasoning_mode: "auto"
   reasoning_effort: "low"
-  signal_api_url: "http://signal-cli-rest-api:8080"
+  signal_mode: "integrated"
+  signal_api_url: "http://127.0.0.1:8080"
   signal_api_token: ""
   signal_account: ""
   allowed_senders: []
   timezone: "Europe/Berlin"
+  learning_enabled: true
+  anomaly_sensitivity: "balanced"
+  memory_retention_days: 365
+  max_memories_per_sender: 200
+  entity_control_enabled: false
+  controllable_entities: []
   allow_sensitive_config: false
   startup_message: true
   conversation_messages: 12
@@ -51,13 +59,22 @@ options:
 schema:
   openai_api_key: password
   openai_model: str
+  reasoning_mode: list(auto|fixed)
   reasoning_effort: list(none|low|medium|high|xhigh|max)
+  signal_mode: list(integrated|external)
   signal_api_url: url
   signal_api_token: password
   signal_account: str
   allowed_senders:
     - str
   timezone: str
+  learning_enabled: bool
+  anomaly_sensitivity: list(conservative|balanced|sensitive)
+  memory_retention_days: int(1,3650)
+  max_memories_per_sender: int(10,1000)
+  entity_control_enabled: bool
+  controllable_entities:
+    - str
   allow_sensitive_config: bool
   startup_message: bool
   conversation_messages: int(2,30)

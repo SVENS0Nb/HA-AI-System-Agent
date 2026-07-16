@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from zoneinfo import available_timezones
 
 import aiohttp
 from aiohttp import web
@@ -13,6 +15,8 @@ from openai import AsyncOpenAI
 
 from .config import ConfigurationError, SettingsStore
 from .ha_client import HomeAssistantReadClient
+from .reasoning import AdaptiveReasoningRouter
+from .signal_bridge import LocalSignalBridge
 from .signal_client import SignalClient
 
 
@@ -99,12 +103,21 @@ def _apply_security_headers(response: web.StreamResponse) -> None:
 
 
 class SettingsUI:
-    def __init__(self, store: SettingsStore, reload_event: Any) -> None:
+    def __init__(
+        self,
+        store: SettingsStore,
+        reload_event: Any,
+        *,
+        signal_bridge: LocalSignalBridge | None = None,
+    ) -> None:
         self.store = store
         self.reload_event = reload_event
+        self.signal_bridge = signal_bridge
+        self._settings_lock = asyncio.Lock()
         self._runner: web.AppRunner | None = None
         self._status: dict[str, Any] = {
             "agent_running": False,
+            "runtime_failed": False,
             "messages": ["Konfiguration wird geladen."],
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -134,10 +147,15 @@ class SettingsUI:
         application.router.add_get("/logo.svg", self._asset)
         application.router.add_get("/healthz", self._health)
         application.router.add_get("/api/settings", self._get_settings)
+        application.router.add_get("/api/timezones", self._get_timezones)
         application.router.add_put("/api/settings", self._put_settings)
         application.router.add_delete("/api/settings", self._reset_settings)
         application.router.add_get("/api/status", self._get_status)
         application.router.add_post("/api/test/{target}", self._test_connection)
+        application.router.add_get("/api/signal/status", self._signal_status)
+        application.router.add_post("/api/signal/link", self._signal_link)
+        application.router.add_post("/api/signal/pair", self._signal_pair)
+        application.router.add_post("/api/signal/unlink", self._signal_unlink)
         return application
 
     async def stop(self) -> None:
@@ -145,9 +163,12 @@ class SettingsUI:
             await self._runner.cleanup()
             self._runner = None
 
-    def set_status(self, *, running: bool, messages: list[str]) -> None:
+    def set_status(
+        self, *, running: bool, messages: list[str], runtime_failed: bool = False
+    ) -> None:
         self._status = {
             "agent_running": running,
+            "runtime_failed": runtime_failed,
             "messages": messages,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -171,7 +192,8 @@ class SettingsUI:
 
     async def _health(self, request: web.Request) -> web.Response:
         del request
-        return web.json_response({"ok": True})
+        healthy = not bool(self._status.get("runtime_failed"))
+        return web.json_response({"ok": healthy}, status=200 if healthy else 503)
 
     async def _get_settings(self, request: web.Request) -> web.Response:
         del request
@@ -181,6 +203,19 @@ class SettingsUI:
             return web.json_response({"ok": False, "error": str(exc)}, status=503)
         return web.json_response({"ok": True, "settings": settings})
 
+    async def _get_timezones(self, request: web.Request) -> web.Response:
+        del request
+        excluded = {"Factory", "localtime", "posixrules"}
+        zones = {
+            name
+            for name in available_timezones()
+            if name not in excluded
+            and not name.startswith(("posix/", "right/", "SystemV/"))
+        }
+        preferred = [name for name in ("Europe/Berlin", "UTC") if name in zones]
+        ordered = preferred + sorted(zones.difference(preferred))
+        return web.json_response({"ok": True, "timezones": ordered})
+
     async def _put_settings(self, request: web.Request) -> web.Response:
         if request.headers.get("X-Requested-With") != "XMLHttpRequest":
             raise web.HTTPForbidden(text="Missing request marker")
@@ -188,7 +223,8 @@ class SettingsUI:
             payload = await request.json()
             if not isinstance(payload, dict):
                 raise ConfigurationError("Die Anfrage muss ein JSON-Objekt enthalten.")
-            settings = self.store.update(payload)
+            async with self._settings_lock:
+                settings = self.store.update(payload)
         except (ConfigurationError, ValueError, TypeError) as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         self.reload_event.set()
@@ -204,7 +240,8 @@ class SettingsUI:
         if request.headers.get("X-Requested-With") != "XMLHttpRequest":
             raise web.HTTPForbidden(text="Missing request marker")
         try:
-            settings = self.store.reset()
+            async with self._settings_lock:
+                settings = self.store.reset()
         except ConfigurationError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         self.reload_event.set()
@@ -220,6 +257,141 @@ class SettingsUI:
     async def _get_status(self, request: web.Request) -> web.Response:
         del request
         return web.json_response({"ok": True, "status": self._status})
+
+    async def _signal_status(self, request: web.Request) -> web.Response:
+        del request
+        bridge = self.signal_bridge
+        if bridge is None:
+            return web.json_response(
+                {"ok": False, "error": "Integrierte Signal-Bridge nicht verfügbar."},
+                status=503,
+            )
+        try:
+            status = await bridge.status()
+            settings = self.store.public()
+        except Exception as exc:
+            return web.json_response(
+                {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"},
+                status=502,
+            )
+        status["configured_account"] = settings.get("signal_account", "")
+        status["allowed_senders"] = settings.get("allowed_senders", [])
+        return web.json_response({"ok": True, "status": status})
+
+    async def _signal_link(self, request: web.Request) -> web.Response:
+        self._require_request_marker(request)
+        bridge = self.signal_bridge
+        if bridge is None:
+            raise web.HTTPServiceUnavailable(
+                text="Integrated Signal bridge unavailable"
+            )
+        try:
+            image = await bridge.qr_code()
+        except Exception as exc:
+            return web.json_response(
+                {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"},
+                status=502,
+            )
+        return web.json_response(
+            {
+                "ok": True,
+                "qr_code": f"data:image/png;base64,{base64.b64encode(image).decode('ascii')}",
+                "message": "QR-Code erstellt. Jetzt mit dem Signal-Bot-Konto scannen.",
+            }
+        )
+
+    async def _signal_pair(self, request: web.Request) -> web.Response:
+        self._require_request_marker(request)
+        bridge = self.signal_bridge
+        if bridge is None:
+            raise web.HTTPServiceUnavailable(
+                text="Integrated Signal bridge unavailable"
+            )
+        try:
+            result = await bridge.start_pairing(self._on_signal_paired)
+        except Exception as exc:
+            return web.json_response(
+                {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"},
+                status=502,
+            )
+        return web.json_response(
+            {
+                "ok": True,
+                **result,
+                "message": "Kopplungscode erstellt.",
+            }
+        )
+
+    async def _signal_unlink(self, request: web.Request) -> web.Response:
+        self._require_request_marker(request)
+        bridge = self.signal_bridge
+        if bridge is None:
+            raise web.HTTPServiceUnavailable(
+                text="Integrated Signal bridge unavailable"
+            )
+        try:
+            payload = await request.json()
+            if (
+                not isinstance(payload, dict)
+                or payload.get("confirmation") != "TRENNEN"
+            ):
+                raise ConfigurationError("Explizite Trennbestätigung fehlt.")
+            settings = self.store.public()
+            account = str(settings.get("signal_account", ""))
+            if not account:
+                accounts = (await bridge.status()).get("accounts", [])
+                if not isinstance(accounts, list) or len(accounts) != 1:
+                    raise ConfigurationError(
+                        "Es konnte kein eindeutiges Signal-Konto ermittelt werden."
+                    )
+                account = str(accounts[0])
+            await bridge.remove_local_account(account)
+            async with self._settings_lock:
+                self.store.update(
+                    {
+                        "signal_mode": "integrated",
+                        "signal_account": "",
+                        "allowed_senders": [],
+                    }
+                )
+        except (ConfigurationError, ValueError, TypeError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        except Exception as exc:
+            return web.json_response(
+                {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"},
+                status=502,
+            )
+        self.reload_event.set()
+        return web.json_response(
+            {
+                "ok": True,
+                "message": "Lokale Signal-Verknüpfung und Absenderfreigaben entfernt.",
+            }
+        )
+
+    async def _on_signal_paired(self, account: str, sender: str) -> None:
+        async with self._settings_lock:
+            values = self.store.combined()
+            existing = values.get("allowed_senders", [])
+            senders = {
+                str(item).strip()
+                for item in existing
+                if isinstance(item, str) and str(item).strip()
+            }
+            senders.add(sender)
+            self.store.update(
+                {
+                    "signal_mode": "integrated",
+                    "signal_account": account,
+                    "allowed_senders": sorted(senders),
+                }
+            )
+        self.reload_event.set()
+
+    @staticmethod
+    def _require_request_marker(request: web.Request) -> None:
+        if request.headers.get("X-Requested-With") != "XMLHttpRequest":
+            raise web.HTTPForbidden(text="Missing request marker")
 
     async def _test_connection(self, request: web.Request) -> web.Response:
         if request.headers.get("X-Requested-With") != "XMLHttpRequest":
@@ -249,6 +421,10 @@ class SettingsUI:
             if target == "homeassistant":
                 detail = await self._test_home_assistant(settings.supervisor_token)
             elif target == "signal":
+                if settings.signal_mode == "integrated":
+                    if self.signal_bridge is None:
+                        raise RuntimeError("Integrierte Signal-Bridge nicht verfügbar")
+                    await self.signal_bridge.wait_until_ready()
                 detail = await self._test_signal(settings)
             elif target == "openai":
                 detail = await self._test_openai(
@@ -282,7 +458,7 @@ class SettingsUI:
             )
             await client.send(
                 recipient,
-                "Home Assistant Read-only Agent: Signal-Verbindung erfolgreich getestet.",
+                "HA AI System Agent: Signal-Verbindung erfolgreich getestet.",
             )
         return f"Testnachricht wurde an {recipient} gesendet."
 
@@ -290,7 +466,16 @@ class SettingsUI:
     async def _test_openai(api_key: str, model: str) -> str:
         client = AsyncOpenAI(api_key=api_key, timeout=20)
         try:
-            result = await client.models.retrieve(model)
+            await client.responses.create(
+                model=model,
+                input="Reply with OK.",
+                store=False,
+                reasoning=cast(
+                    Any,
+                    {"effort": AdaptiveReasoningRouter.for_model(model, "low")},
+                ),
+                max_output_tokens=64,
+            )
         finally:
             await client.close()
-        return f"OpenAI-Modell {result.id} ist erreichbar."
+        return f"OpenAI-Modell {model} unterstützt die konfigurierte Responses-Verbindung."

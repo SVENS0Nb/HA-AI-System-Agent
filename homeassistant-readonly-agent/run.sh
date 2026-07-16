@@ -1,4 +1,4 @@
 #!/bin/sh
 set -eu
 
-exec python3 -m app.main
+exec /opt/ha-agent-venv/bin/python -m app.main

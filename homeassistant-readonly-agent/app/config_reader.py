@@ -24,7 +24,11 @@ def _construct_unknown(
         return loader.construct_scalar(node)
     if isinstance(node, yaml.SequenceNode):
         return loader.construct_sequence(node)
-    return loader.construct_mapping(node)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node)
+    raise yaml.constructor.ConstructorError(
+        None, None, f"Unsupported YAML node for tag !{tag_suffix}", node.start_mark
+    )
 
 
 PermissiveLoader.add_multi_constructor("!", _construct_unknown)

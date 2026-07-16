@@ -12,6 +12,8 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
 
+from .redaction import redact_text
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -24,7 +26,7 @@ class SignalClient:
         api_token: str,
         allowed_senders: frozenset[str],
         session: aiohttp.ClientSession,
-        claim_message: Callable[[str], bool] | None = None,
+        claim_message: Callable[[str, str, str], bool] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._account = account
@@ -52,12 +54,15 @@ class SignalClient:
             ) as response:
                 response.raise_for_status()
 
-    async def messages(self) -> AsyncIterator[tuple[str, str]]:
+    async def messages(self) -> AsyncIterator[tuple[str, str, str]]:
         delay = 1
         while True:
             try:
                 async with self._session.ws_connect(
-                    self._receive_url(), heartbeat=30, headers=self._headers
+                    self._receive_url(),
+                    heartbeat=30,
+                    headers=self._headers,
+                    timeout=aiohttp.ClientWSTimeout(ws_receive=None, ws_close=10),
                 ) as socket:
                     delay = 1
                     async for message in socket:
@@ -87,24 +92,24 @@ class SignalClient:
         path = f"{parts.path.rstrip('/')}/v1/receive/{quote(self._account, safe='+')}"
         return urlunsplit((scheme, parts.netloc, path, "", ""))
 
-    def _parse(self, raw: str) -> tuple[str, str] | None:
+    def _parse(self, raw: str) -> tuple[str, str, str] | None:
         parsed = self._parse_many(raw)
         return parsed[0] if parsed else None
 
-    def _parse_many(self, raw: str) -> list[tuple[str, str]]:
+    def _parse_many(self, raw: str) -> list[tuple[str, str, str]]:
         try:
             payload: Any = json.loads(raw)
         except json.JSONDecodeError:
             return []
         items = payload if isinstance(payload, list) else [payload]
-        result: list[tuple[str, str]] = []
+        result: list[tuple[str, str, str]] = []
         for item in items:
             parsed = self._parse_item(item)
             if parsed is not None:
                 result.append(parsed)
         return result
 
-    def _parse_item(self, payload: Any) -> tuple[str, str] | None:
+    def _parse_item(self, payload: Any) -> tuple[str, str, str] | None:
         if not isinstance(payload, dict):
             return None
         envelope = payload.get("envelope")
@@ -140,8 +145,9 @@ class SignalClient:
         dedupe_key = hashlib.sha256(
             f"{sender}\0{timestamp}\0{data['message']}".encode("utf-8")
         ).hexdigest()
+        incoming = redact_text(incoming)
         if self._claim_message is not None:
-            if not self._claim_message(dedupe_key):
+            if not self._claim_message(dedupe_key, sender, incoming):
                 return None
         elif dedupe_key in self._seen_set:
             return None
@@ -149,4 +155,4 @@ class SignalClient:
             self._seen_set.discard(self._seen[0])
         self._seen.append(dedupe_key)
         self._seen_set.add(dedupe_key)
-        return sender, incoming
+        return dedupe_key, sender, incoming

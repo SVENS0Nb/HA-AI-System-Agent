@@ -7,6 +7,11 @@ from typing import Any
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 
 from .config_reader import ConfigReader
+from .entity_control import (
+    SUPPORTED_CONTROL_ACTIONS,
+    resolve_entity_control,
+    validate_controllable_entity_id,
+)
 from .ha_client import HomeAssistantReadClient
 from .monitors import MonitorService
 from .redaction import redact_data, redact_text
@@ -28,6 +33,8 @@ def _tool(
     parameters: dict[str, Any],
     *,
     mutation: bool = False,
+    learning: bool = False,
+    control: bool = False,
     strict: bool = True,
 ) -> dict[str, Any]:
     result = {
@@ -38,6 +45,8 @@ def _tool(
         "strict": strict,
     }
     result["_mutation"] = mutation
+    result["_learning"] = learning
+    result["_control"] = control
     return result
 
 
@@ -131,6 +140,94 @@ TOOL_DEFINITIONS = [
             },
             ["query", "lines"],
         ),
+    ),
+    _tool(
+        "list_memories",
+        "List durable notes learned from this Signal user's own conversations. Use when the user asks what is remembered.",
+        _object(
+            {
+                "query": {"type": ["string", "null"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
+            ["query", "limit"],
+        ),
+        learning=True,
+    ),
+    _tool(
+        "remember_user_note",
+        "Remember an important exact statement from the current authenticated user's message. Evidence must be an exact excerpt of that message; never use logs, config, events, tool results, or assistant text.",
+        _object(
+            {
+                "evidence": {"type": "string", "minLength": 8, "maxLength": 1000},
+                "category": {
+                    "type": "string",
+                    "enum": [
+                        "preference",
+                        "normal_behavior",
+                        "context",
+                        "important_event",
+                    ],
+                },
+                "importance": {"type": "integer", "minimum": 1, "maximum": 5},
+                "ttl_days": {"type": "integer", "minimum": 1, "maximum": 3650},
+            },
+            ["evidence", "category", "importance", "ttl_days"],
+        ),
+        mutation=True,
+        learning=True,
+    ),
+    _tool(
+        "forget_user_note",
+        "Delete one memory only when the current authenticated user explicitly asks to forget, remove, or correct it.",
+        _object(
+            {
+                "memory_id": {"type": "string"},
+                "request_evidence": {
+                    "type": "string",
+                    "minLength": 6,
+                    "maxLength": 1000,
+                },
+            },
+            ["memory_id", "request_evidence"],
+        ),
+        mutation=True,
+        learning=True,
+    ),
+    _tool(
+        "get_entity_behavior",
+        "Read the locally learned behavior baseline and recent anomaly events for one exact entity ID.",
+        _object({"entity_id": {"type": "string"}}, ["entity_id"]),
+        learning=True,
+    ),
+    _tool(
+        "control_entity",
+        "Propose one allowlisted physical entity action. This never controls automations, scripts, scenes, buttons, helpers, system services, updates, or files. The exact authenticated user request is required and a separate BESTÄTIGEN code is always required before execution.",
+        _object(
+            {
+                "entity_id": {"type": "string"},
+                "action": {
+                    "type": "string",
+                    "enum": list(SUPPORTED_CONTROL_ACTIONS),
+                },
+                "value": {
+                    "type": ["number", "null"],
+                    "description": "Required only for numeric actions; otherwise null.",
+                },
+                "mode": {
+                    "type": ["string", "null"],
+                    "description": "Required only for mode/option actions; otherwise null.",
+                },
+                "request_evidence": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 1000,
+                    "description": "Exact excerpt of the current authenticated Signal message requesting this control action.",
+                },
+            },
+            ["entity_id", "action", "value", "mode", "request_evidence"],
+        ),
+        mutation=True,
+        control=True,
     ),
     _tool(
         "create_cron_job",
@@ -245,16 +342,26 @@ class ToolRegistry:
         storage: Storage,
         monitors: MonitorService,
         default_log_lines: int,
+        learning_enabled: bool = True,
+        entity_control_enabled: bool = False,
+        controllable_entities: frozenset[str] = frozenset(),
     ) -> None:
         self.ha = ha
         self.config_reader = config_reader
         self.storage = storage
         self.monitors = monitors
         self.default_log_lines = default_log_lines
+        self.learning_enabled = learning_enabled
+        self.entity_control_enabled = entity_control_enabled
+        self.controllable_entities = controllable_entities
 
     def definitions(self, allow_monitor_changes: bool) -> list[dict[str, Any]]:
         definitions = []
         for item in TOOL_DEFINITIONS:
+            if item.get("_learning") and not self.learning_enabled:
+                continue
+            if item.get("_control") and not self.entity_control_enabled:
+                continue
             if item.get("_mutation") and not allow_monitor_changes:
                 continue
             definitions.append(
@@ -269,26 +376,45 @@ class ToolRegistry:
         *,
         sender: str,
         allow_monitor_changes: bool,
+        trusted_user_message: str | None = None,
     ) -> Any:
         mutation_names = {
             item["name"] for item in TOOL_DEFINITIONS if item.get("_mutation")
         }
         if name in mutation_names and not allow_monitor_changes:
             raise PermissionError(
-                "Monitor changes are disabled for proactive/event-triggered runs"
+                "Persistente Änderungen sind in proaktiven oder event-getriggerten Läufen deaktiviert."
             )
+        if name in {"remember_user_note", "forget_user_note", "control_entity"}:
+            arguments = {
+                **arguments,
+                "trusted_user_message": trusted_user_message,
+            }
         handler = getattr(self, f"_tool_{name}", None)
         if handler is None:
             raise KeyError(f"Unknown tool: {name}")
         return await handler(sender=sender, **arguments)
 
     async def confirm_action(self, sender: str, token: str) -> Any:
-        pending = self.storage.get_pending_action(sender, token)
+        # Storage consumes the token atomically before any Home Assistant side
+        # effect and can replay a previously persisted success without executing.
+        pending = self.storage.begin_pending_action(sender, token)
+        if pending["replayed"]:
+            return pending["result"]
         handler = getattr(self, f"_apply_{pending['action']}", None)
         if handler is None:
+            self.storage.fail_action_execution(
+                sender, token, "Unknown pending action"
+            )
             raise KeyError("Unknown pending action")
-        result = await handler(sender=sender, **pending["arguments"])
-        self.storage.delete_pending_action(sender, token)
+        try:
+            result = await handler(sender=sender, **pending["arguments"])
+        except BaseException as exc:
+            self.storage.fail_action_execution(
+                sender, token, f"{type(exc).__name__}: {exc}"
+            )
+            raise
+        self.storage.complete_action_execution(sender, token, result)
         return result
 
     def cancel_actions(self, sender: str) -> int:
@@ -384,6 +510,122 @@ class ToolRegistry:
             await self.ha.core_logs(lines or self.default_log_lines), query
         )
 
+    async def _tool_list_memories(
+        self, *, sender: str, query: str | None, limit: int
+    ) -> Any:
+        return self.storage.list_memories(sender, query=query or "", limit=limit)
+
+    async def _tool_remember_user_note(
+        self,
+        *,
+        sender: str,
+        evidence: str,
+        category: str,
+        importance: int,
+        ttl_days: int,
+        trusted_user_message: str | None,
+    ) -> Any:
+        exact_evidence = self._verify_user_evidence(evidence, trusted_user_message)
+        return self.storage.add_memory(
+            owner=sender,
+            content=redact_text(exact_evidence),
+            category=category,
+            importance=importance,
+            ttl_days=ttl_days,
+            source="user",
+        )
+
+    async def _tool_forget_user_note(
+        self,
+        *,
+        sender: str,
+        memory_id: str,
+        request_evidence: str,
+        trusted_user_message: str | None,
+    ) -> Any:
+        request = self._verify_user_evidence(
+            request_evidence, trusted_user_message
+        ).casefold()
+        if not any(
+            marker in request
+            for marker in (
+                "vergiss",
+                "lösche",
+                "entferne",
+                "nicht mehr",
+                "veraltet",
+                "forget",
+                "delete",
+                "remove",
+                "obsolete",
+            )
+        ):
+            raise PermissionError("Die aktuelle Nachricht enthält keinen Löschauftrag.")
+        self.storage.delete_memory(sender, memory_id)
+        return {"deleted": True, "memory_id": memory_id}
+
+    async def _tool_get_entity_behavior(self, *, sender: str, entity_id: str) -> Any:
+        del sender
+        behavior = self.storage.entity_behavior(entity_id)
+        return {
+            "learned": behavior is not None,
+            "baseline": behavior,
+            "recent_anomalies": self.storage.recent_anomalies(
+                entity_id=entity_id, limit=20
+            ),
+        }
+
+    async def _tool_control_entity(
+        self,
+        *,
+        sender: str,
+        entity_id: str,
+        action: str,
+        value: float | int | None,
+        mode: str | None,
+        request_evidence: str,
+        trusted_user_message: str | None,
+    ) -> Any:
+        entity_id = self._assert_entity_control_allowed(entity_id)
+        self._verify_trusted_excerpt(
+            request_evidence,
+            trusted_user_message,
+            minimum=3,
+            error="Die Steuerungsanfrage muss aus der aktuellen Signal-Nachricht stammen.",
+        )
+        state = await self.ha.state(entity_id)
+        command = resolve_entity_control(state, action, value, mode)
+        proposal = self._propose(
+            sender,
+            "control_entity",
+            {
+                "entity_id": entity_id,
+                "action": action,
+                "value": value,
+                "mode": mode,
+            },
+        )
+        return {
+            **proposal,
+            "entity_id": entity_id,
+            "current_state": state.get("state"),
+            "planned_action": f"{command['domain']}.{command['service']}",
+            "planned_data": command["service_data"],
+        }
+
+    async def _apply_control_entity(
+        self,
+        *,
+        sender: str,
+        entity_id: str,
+        action: str,
+        value: float | int | None,
+        mode: str | None,
+    ) -> Any:
+        del sender
+        entity_id = self._assert_entity_control_allowed(entity_id)
+        return await self.ha.control_entity(entity_id, action, value, mode)
+
     async def _tool_create_cron_job(
         self, *, sender: str, name: str, cron: str, task: str, cooldown_seconds: int
     ) -> Any:
@@ -462,6 +704,7 @@ class ToolRegistry:
             task=task,
             recipient=sender,
         )
+        self.monitors.refresh_cron_jobs()
         await self.monitors.evaluate_entity_monitor(monitor)
         return monitor
 
@@ -507,7 +750,7 @@ class ToolRegistry:
         task: str,
         cooldown_seconds: int,
     ) -> Any:
-        return self.storage.add_monitor(
+        monitor = self.storage.add_monitor(
             name=name,
             kind="event",
             spec={
@@ -518,6 +761,8 @@ class ToolRegistry:
             task=task,
             recipient=sender,
         )
+        await self.monitors.monitor_changed(monitor)
+        return monitor
 
     async def _tool_list_monitors(self, *, sender: str) -> Any:
         return [
@@ -555,6 +800,41 @@ class ToolRegistry:
     def _assert_owner(self, monitor_id: str, sender: str) -> None:
         if self.storage.get_monitor(monitor_id)["recipient"] != sender:
             raise PermissionError("Monitor belongs to a different Signal sender")
+
+    def _assert_entity_control_allowed(self, entity_id: str) -> str:
+        if not self.entity_control_enabled:
+            raise PermissionError("Die Gerätesteuerung ist in der UI deaktiviert.")
+        entity_id = validate_controllable_entity_id(entity_id)
+        if entity_id not in self.controllable_entities:
+            raise PermissionError(
+                f"{entity_id} ist nicht in der UI-Steuerungsliste freigegeben."
+            )
+        return entity_id
+
+    @staticmethod
+    def _verify_user_evidence(evidence: str, trusted_user_message: str | None) -> str:
+        return ToolRegistry._verify_trusted_excerpt(
+            evidence,
+            trusted_user_message,
+            minimum=6,
+            error="Die Erinnerung muss ein exakter Ausschnitt der aktuellen Nutzernachricht sein.",
+        )
+
+    @staticmethod
+    def _verify_trusted_excerpt(
+        evidence: str,
+        trusted_user_message: str | None,
+        *,
+        minimum: int,
+        error: str,
+    ) -> str:
+        if trusted_user_message is None:
+            raise PermissionError(error)
+        evidence = " ".join(evidence.split())
+        trusted = " ".join(trusted_user_message.split())
+        if len(evidence) < minimum or evidence.casefold() not in trusted.casefold():
+            raise PermissionError(error)
+        return evidence
 
     @staticmethod
     def _filter_logs(logs: str, query: str | None) -> dict[str, Any]:

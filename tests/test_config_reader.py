@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from app.config_reader import ConfigAccessDenied, ConfigReader
+from app.redaction import redact_text
 
 
 class ConfigReaderTests(unittest.TestCase):
@@ -71,6 +72,20 @@ class ConfigReaderTests(unittest.TestCase):
         (self.root / ".storage" / "custom").write_text("safe-looking", encoding="utf-8")
         with self.assertRaises(ConfigAccessDenied):
             self.reader.read(".storage/custom")
+
+    def test_redaction_covers_quoted_commas_uri_credentials_and_query_tokens(
+        self,
+    ) -> None:
+        value = (
+            '{"password":"abc,def","safe":"visible"}\n'
+            "mqtt://user:password@broker/topic\n"
+            "https://example.test/callback?authSig=top-secret&safe=yes"
+        )
+        redacted = redact_text(value)
+        for secret in ("abc", "def", "user:password", "top-secret"):
+            self.assertNotIn(secret, redacted)
+        self.assertIn('"safe":"visible"', redacted)
+        self.assertIn("safe=yes", redacted)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,9 @@ from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .entity_control import validate_controllable_entity_id
+from .signal_bridge import LOCAL_SIGNAL_URL
+
 
 class ConfigurationError(ValueError):
     """Raised when add-on options are missing or invalid."""
@@ -22,12 +25,20 @@ EMPTY_SECRET = str()
 class Settings:
     openai_api_key: str
     openai_model: str
+    reasoning_mode: str
     reasoning_effort: str
+    signal_mode: str
     signal_api_url: str
     signal_api_token: str
     signal_account: str
     allowed_senders: frozenset[str]
     timezone: str
+    learning_enabled: bool
+    anomaly_sensitivity: str
+    memory_retention_days: int
+    max_memories_per_sender: int
+    entity_control_enabled: bool
+    controllable_entities: frozenset[str]
     allow_sensitive_config: bool
     startup_message: bool
     conversation_messages: int
@@ -53,17 +64,43 @@ class Settings:
         senders = frozenset(
             str(item).strip() for item in raw_senders if str(item).strip()
         )
+        signal_mode = cls._signal_mode(options)
         return cls(
             openai_api_key=str(options.get("openai_api_key", "")).strip(),
             openai_model=str(options.get("openai_model", "gpt-5.6-luna")).strip(),
+            reasoning_mode=cls._reasoning_mode(options),
             reasoning_effort=str(options.get("reasoning_effort", "low")),
-            signal_api_url=str(
-                options.get("signal_api_url", "http://signal-cli-rest-api:8080")
-            ).rstrip("/"),
-            signal_api_token=str(options.get("signal_api_token", "")).strip(),
+            signal_mode=signal_mode,
+            signal_api_url=(
+                LOCAL_SIGNAL_URL
+                if signal_mode == "integrated"
+                else str(
+                    options.get("signal_api_url", "http://signal-cli-rest-api:8080")
+                ).rstrip("/")
+            ),
+            signal_api_token=(
+                EMPTY_SECRET
+                if signal_mode == "integrated"
+                else str(options.get("signal_api_token", "")).strip()
+            ),
             signal_account=str(options.get("signal_account", "")).strip(),
             allowed_senders=senders,
             timezone=str(options.get("timezone", "Europe/Berlin")),
+            learning_enabled=cls._bool(
+                options.get("learning_enabled", True), "learning_enabled"
+            ),
+            anomaly_sensitivity=cls._anomaly_sensitivity(options),
+            memory_retention_days=max(
+                1, min(3650, int(options.get("memory_retention_days", 365)))
+            ),
+            max_memories_per_sender=max(
+                10, min(1000, int(options.get("max_memories_per_sender", 200)))
+            ),
+            entity_control_enabled=cls._bool(
+                options.get("entity_control_enabled", False),
+                "entity_control_enabled",
+            ),
+            controllable_entities=cls._controllable_entities(options),
             allow_sensitive_config=cls._bool(
                 options.get("allow_sensitive_config", False), "allow_sensitive_config"
             ),
@@ -113,12 +150,69 @@ class Settings:
             raise TypeError(f"{name} muss true oder false sein")
         return value
 
+    @staticmethod
+    def _signal_mode(options: dict[str, Any]) -> str:
+        value = options.get("signal_mode")
+        if value is None:
+            legacy_url = str(options.get("signal_api_url", "")).rstrip("/")
+            return (
+                "integrated"
+                if legacy_url
+                in {"", "http://signal-cli-rest-api:8080", LOCAL_SIGNAL_URL}
+                else "external"
+            )
+        if not isinstance(value, str) or value not in {"integrated", "external"}:
+            raise ValueError("signal_mode muss integrated oder external sein")
+        return value
+
+    @staticmethod
+    def _reasoning_mode(options: dict[str, Any]) -> str:
+        value = options.get("reasoning_mode", "auto")
+        if not isinstance(value, str) or value not in {"auto", "fixed"}:
+            raise ValueError("reasoning_mode muss auto oder fixed sein")
+        return value
+
+    @staticmethod
+    def _anomaly_sensitivity(options: dict[str, Any]) -> str:
+        value = options.get("anomaly_sensitivity", "balanced")
+        if not isinstance(value, str) or value not in {
+            "conservative",
+            "balanced",
+            "sensitive",
+        }:
+            raise ValueError(
+                "anomaly_sensitivity muss conservative, balanced oder sensitive sein"
+            )
+        return value
+
+    @staticmethod
+    def _controllable_entities(options: dict[str, Any]) -> frozenset[str]:
+        raw = options.get("controllable_entities", [])
+        if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+            raise TypeError("controllable_entities muss eine Liste von Entity-IDs sein")
+        if len(raw) > 500:
+            raise ValueError(
+                "controllable_entities darf höchstens 500 Einträge enthalten"
+            )
+        return frozenset(
+            validate_controllable_entity_id(item) for item in raw if item.strip()
+        )
+
     def validation_errors(self) -> list[str]:
         return [
             *self.openai_validation_errors(),
             *self.signal_validation_errors(),
+            *self.capability_validation_errors(),
             *self.environment_validation_errors(),
         ]
+
+    def capability_validation_errors(self) -> list[str]:
+        if self.entity_control_enabled and not self.controllable_entities:
+            return [
+                "Für aktive Gerätesteuerung muss mindestens eine Entity-ID "
+                "explizit freigegeben werden."
+            ]
+        return []
 
     def openai_validation_errors(self) -> list[str]:
         errors: list[str] = []
@@ -126,6 +220,8 @@ class Settings:
             errors.append("OpenAI API-Key fehlt.")
         if not self.openai_model:
             errors.append("OpenAI-Modell fehlt.")
+        if self.reasoning_mode not in {"auto", "fixed"}:
+            errors.append("Reasoning-Steuerung ist ungültig.")
         if self.reasoning_effort not in {
             "none",
             "low",
@@ -139,13 +235,16 @@ class Settings:
 
     def signal_validation_errors(self) -> list[str]:
         errors: list[str] = []
-        url = urlsplit(self.signal_api_url)
-        if url.scheme not in {"http", "https"} or not url.netloc:
-            errors.append("Signal-API-URL muss eine gültige HTTP- oder HTTPS-URL sein.")
-        elif url.username or url.password or url.query or url.fragment:
-            errors.append(
-                "Signal-API-URL darf keine Zugangsdaten, Query-Parameter oder Fragmente enthalten."
-            )
+        if self.signal_mode == "external":
+            url = urlsplit(self.signal_api_url)
+            if url.scheme not in {"http", "https"} or not url.netloc:
+                errors.append(
+                    "Signal-API-URL muss eine gültige HTTP- oder HTTPS-URL sein."
+                )
+            elif url.username or url.password or url.query or url.fragment:
+                errors.append(
+                    "Signal-API-URL darf keine Zugangsdaten, Query-Parameter oder Fragmente enthalten."
+                )
         e164 = re.compile(r"^\+[1-9]\d{6,14}$")
         if not e164.fullmatch(self.signal_account):
             errors.append(
@@ -182,12 +281,20 @@ class SettingsStore:
     FIELDS = {
         "openai_api_key",
         "openai_model",
+        "reasoning_mode",
         "reasoning_effort",
+        "signal_mode",
         "signal_api_url",
         "signal_api_token",
         "signal_account",
         "allowed_senders",
         "timezone",
+        "learning_enabled",
+        "anomaly_sensitivity",
+        "memory_retention_days",
+        "max_memories_per_sender",
+        "entity_control_enabled",
+        "controllable_entities",
         "allow_sensitive_config",
         "startup_message",
         "conversation_messages",
@@ -206,13 +313,21 @@ class SettingsStore:
     STRING_FIELDS = {
         "openai_api_key",
         "openai_model",
+        "reasoning_mode",
         "reasoning_effort",
+        "signal_mode",
         "signal_api_url",
         "signal_api_token",
         "signal_account",
         "timezone",
+        "anomaly_sensitivity",
     }
-    BOOLEAN_FIELDS = {"allow_sensitive_config", "startup_message"}
+    BOOLEAN_FIELDS = {
+        "allow_sensitive_config",
+        "startup_message",
+        "learning_enabled",
+        "entity_control_enabled",
+    }
     INTEGER_FIELDS = {
         "conversation_messages",
         "max_config_file_kb",
@@ -225,6 +340,8 @@ class SettingsStore:
         "max_messages_per_sender",
         "max_monitors_per_sender",
         "reconcile_interval_seconds",
+        "memory_retention_days",
+        "max_memories_per_sender",
     }
 
     def __init__(
@@ -244,7 +361,20 @@ class SettingsStore:
 
     def combined(self) -> dict[str, Any]:
         options = self._read_json(self.options_path, required=True)
-        options.update(self._read_json(self.override_path, required=False))
+        overrides = self._read_json(self.override_path, required=False)
+        if "signal_mode" not in overrides:
+            previous_url = str(
+                overrides.get("signal_api_url", options.get("signal_api_url", ""))
+            ).rstrip("/")
+            if previous_url not in {
+                "",
+                "http://signal-cli-rest-api:8080",
+                LOCAL_SIGNAL_URL,
+            }:
+                # Releases before 0.4 had no explicit mode. Preserve their custom
+                # endpoint even if Supervisor adds the new integrated default.
+                options["signal_mode"] = "external"
+        options.update(overrides)
         return options
 
     def public(self) -> dict[str, Any]:
@@ -256,6 +386,22 @@ class SettingsStore:
         }
         result["openai_api_key"] = ""
         result["signal_api_token"] = EMPTY_SECRET
+        result["signal_mode"] = Settings._signal_mode(values)
+        result["reasoning_mode"] = Settings._reasoning_mode(values)
+        result["learning_enabled"] = Settings._bool(
+            values.get("learning_enabled", True), "learning_enabled"
+        )
+        result["anomaly_sensitivity"] = Settings._anomaly_sensitivity(values)
+        result["memory_retention_days"] = int(values.get("memory_retention_days", 365))
+        result["max_memories_per_sender"] = int(
+            values.get("max_memories_per_sender", 200)
+        )
+        result["entity_control_enabled"] = Settings._bool(
+            values.get("entity_control_enabled", False), "entity_control_enabled"
+        )
+        result["controllable_entities"] = sorted(
+            Settings._controllable_entities(values)
+        )
         result["openai_api_key_set"] = bool(values.get("openai_api_key"))
         result["signal_api_token_set"] = bool(values.get("signal_api_token"))
         return result
@@ -285,13 +431,18 @@ class SettingsStore:
         } & submitted.keys():
             if not isinstance(submitted[key], bool):
                 raise ConfigurationError(f"{key} muss true oder false sein.")
-        if "allowed_senders" in submitted and (
-            not isinstance(submitted["allowed_senders"], list)
-            or not all(isinstance(item, str) for item in submitted["allowed_senders"])
-        ):
-            raise ConfigurationError(
-                "allowed_senders muss eine Liste von Telefonnummern sein."
-            )
+        list_fields = {
+            "allowed_senders": "Telefonnummern",
+            "controllable_entities": "Entity-IDs",
+        }
+        for field, description in list_fields.items():
+            if field in submitted and (
+                not isinstance(submitted[field], list)
+                or not all(isinstance(item, str) for item in submitted[field])
+            ):
+                raise ConfigurationError(
+                    f"{field} muss eine Liste von {description} sein."
+                )
         before = self.combined()
         current = self._read_json(self.override_path, required=False)
         for key in self.FIELDS:

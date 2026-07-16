@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config import ConfigurationError, SettingsStore
+from app.signal_bridge import LOCAL_SIGNAL_URL
 
 
 class SettingsStoreTests(unittest.TestCase):
@@ -155,6 +156,90 @@ class SettingsStoreTests(unittest.TestCase):
             self.store.update({"reasoning_effort": "xhigh"}).openai_validation_errors(),
             [],
         )
+
+    def test_existing_installations_default_to_adaptive_reasoning(self) -> None:
+        self.assertEqual(self.store.settings().reasoning_mode, "auto")
+        self.assertEqual(self.store.public()["reasoning_mode"], "auto")
+        self.assertEqual(
+            self.store.update({"reasoning_mode": "fixed"}).reasoning_mode, "fixed"
+        )
+
+    def test_existing_installations_default_to_safe_local_learning(self) -> None:
+        settings = self.store.settings()
+        self.assertTrue(settings.learning_enabled)
+        self.assertEqual(settings.anomaly_sensitivity, "balanced")
+        self.assertEqual(settings.memory_retention_days, 365)
+        self.assertEqual(settings.max_memories_per_sender, 200)
+        public = self.store.public()
+        self.assertTrue(public["learning_enabled"])
+        self.assertEqual(public["anomaly_sensitivity"], "balanced")
+
+    def test_entity_control_is_opt_in_and_validates_entity_allowlist(self) -> None:
+        settings = self.store.settings()
+        self.assertFalse(settings.entity_control_enabled)
+        self.assertEqual(settings.controllable_entities, frozenset())
+        public = self.store.public()
+        self.assertFalse(public["entity_control_enabled"])
+        self.assertEqual(public["controllable_entities"], [])
+
+        enabled = self.store.update(
+            {
+                "entity_control_enabled": True,
+                "controllable_entities": ["light.kitchen", "climate.office"],
+            }
+        )
+        self.assertTrue(enabled.entity_control_enabled)
+        self.assertEqual(
+            enabled.controllable_entities,
+            frozenset({"light.kitchen", "climate.office"}),
+        )
+        empty = self.store.update({"controllable_entities": []})
+        self.assertTrue(empty.capability_validation_errors())
+        self.store.update(
+            {"controllable_entities": ["light.kitchen", "climate.office"]}
+        )
+        with self.assertRaisesRegex(ConfigurationError, "Domain automation"):
+            self.store.update({"controllable_entities": ["automation.open_door"]})
+        with self.assertRaises(ConfigurationError):
+            self.store.update({"controllable_entities": "light.kitchen"})
+
+    def test_invalid_anomaly_sensitivity_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "anomaly_sensitivity"):
+            self.store.update({"anomaly_sensitivity": "extreme"})
+
+    def test_invalid_reasoning_mode_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "reasoning_mode"):
+            self.store.update({"reasoning_mode": "random"})
+
+    def test_existing_custom_signal_url_migrates_to_external_mode(self) -> None:
+        settings = self.store.settings()
+        self.assertEqual(settings.signal_mode, "external")
+        self.assertEqual(self.store.public()["signal_mode"], "external")
+        self.assertEqual(settings.signal_api_url, "http://signal:8080")
+
+    def test_old_ui_url_wins_over_new_native_integrated_default(self) -> None:
+        native = json.loads(self.options.read_text(encoding="utf-8"))
+        native["signal_mode"] = "integrated"
+        native["signal_api_url"] = "http://127.0.0.1:8080"
+        self.options.write_text(json.dumps(native), encoding="utf-8")
+        self.overrides.write_text(
+            json.dumps({"signal_api_url": "http://192.168.1.20:8080"}),
+            encoding="utf-8",
+        )
+        settings = self.store.settings()
+        self.assertEqual(settings.signal_mode, "external")
+        self.assertEqual(settings.signal_api_url, "http://192.168.1.20:8080")
+
+    def test_integrated_mode_uses_loopback_and_never_uses_proxy_token(self) -> None:
+        settings = self.store.update({"signal_mode": "integrated"})
+        self.assertEqual(settings.signal_mode, "integrated")
+        self.assertEqual(settings.signal_api_url, LOCAL_SIGNAL_URL)
+        self.assertEqual(settings.signal_api_token, "")
+        self.assertEqual(settings.signal_validation_errors(), [])
+
+    def test_invalid_signal_mode_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "signal_mode"):
+            self.store.update({"signal_mode": "automatic-ish"})
 
 
 if __name__ == "__main__":
