@@ -56,6 +56,7 @@ jobs:
           set -eu
           docker run --detach \
             --name ha-ai-signal-smoke \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
             --entrypoint /usr/local/bin/signal-bridge-entrypoint \
             ha-ai-system-agent:ci
           cleanup() {
@@ -78,5 +79,23 @@ jobs:
             sleep 2
           done
           [ "$ready" = "true" ]
+          docker exec ha-ai-signal-smoke sh -c \
+            "grep -F 'command=signal-cli-native -Djava.io.tmpdir=/run/ha-ai-signal ' /etc/supervisor/conf.d/signal-cli-json-rpc-1.conf"
+          docker exec ha-ai-signal-smoke sh -c \
+            "find /run/ha-ai-signal -type f -name 'libsignal*.so' -print -quit | grep -q ."
+          if docker exec ha-ai-signal-smoke sh -c \
+            "find /tmp -name 'libsignal*' -print -quit | grep -q ."
+          then
+            echo "libsignal unexpectedly used Home Assistant's noexec /tmp" >&2
+            exit 1
+          fi
+          docker exec ha-ai-signal-smoke sh -c \
+            "supervisorctl -c /etc/supervisor/signal-bridge.conf status signal-cli-json-rpc-1 | grep -F RUNNING"
+          if docker exec ha-ai-signal-smoke sh -c \
+            "ps -eo comm= | grep -E '^(java|signal-cli)$'"
+          then
+            echo "The lightweight native bridge unexpectedly started a JVM process" >&2
+            exit 1
+          fi
           docker exec ha-ai-signal-smoke \
             supervisorctl -c /etc/supervisor/signal-bridge.conf status

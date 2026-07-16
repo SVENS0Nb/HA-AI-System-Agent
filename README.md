@@ -73,7 +73,7 @@ Das Repository enthält bereits die für den Home-Assistant-App-Store erforderli
 
 ## 2. Signal automatisch verbinden
 
-Im Standardmodus wird die Signal-Bridge innerhalb desselben Add-on-Containers gestartet. Sie ist nur über `127.0.0.1` erreichbar; es wird kein Signal-Port in das Heimnetz oder Internet veröffentlicht.
+Im Standardmodus wird die Signal-Bridge innerhalb desselben Add-on-Containers gestartet. Sie ist nur über `127.0.0.1` erreichbar; es wird kein Signal-Port in das Heimnetz oder Internet veröffentlicht. Der dauerhafte Signal-Daemon verwendet die native, speicherschonende Ausführung und benötigt zur Laufzeit keine Java-VM.
 
 1. In der Add-on-Seite **Weboberfläche öffnen** wählen.
 2. Unter Signal **Integriert – automatisch** auswählen.
