@@ -149,7 +149,7 @@ class SettingsStoreTests(unittest.TestCase):
         )
         errors = " ".join(settings.signal_validation_errors())
         self.assertIn("Zugangsdaten", errors)
-        self.assertIn("Bot-Nummer", errors)
+        self.assertIn("Kontonummer", errors)
 
     def test_integrated_signal_onboarding_uses_actionable_messages(self) -> None:
         settings = self.store.update(
@@ -161,8 +161,31 @@ class SettingsStoreTests(unittest.TestCase):
         )
         errors = settings.signal_validation_errors()
         self.assertIn("Signal-Konto ist noch nicht per QR-Code verbunden.", errors)
-        self.assertIn("Noch kein persönlicher Signal-Absender gekoppelt.", errors)
-        self.assertNotIn("Signal-Bot-Nummer", " ".join(errors))
+        self.assertTrue(any("„Notiz an mich“" in error for error in errors))
+        self.assertNotIn("Signal-Kontonummer", " ".join(errors))
+
+    def test_note_to_self_is_opt_in_and_can_replace_or_extend_senders(self) -> None:
+        settings = self.store.settings()
+        self.assertFalse(settings.signal_self_chat_enabled)
+        self.assertEqual(settings.signal_recipients, frozenset({"+49123456780"}))
+        self.assertFalse(self.store.public()["signal_self_chat_enabled"])
+
+        self_only = self.store.update(
+            {
+                "signal_self_chat_enabled": True,
+                "allowed_senders": [],
+            }
+        )
+        self.assertEqual(self_only.signal_validation_errors(), [])
+        self.assertEqual(self_only.signal_recipients, frozenset({"+49123456789"}))
+
+        combined = self.store.update(
+            {"allowed_senders": ["+49123456780", "+49123456781"]}
+        )
+        self.assertEqual(
+            combined.signal_recipients,
+            frozenset({"+49123456789", "+49123456780", "+49123456781"}),
+        )
 
     def test_extended_reasoning_levels_are_supported(self) -> None:
         self.assertEqual(

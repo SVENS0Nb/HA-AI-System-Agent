@@ -19,8 +19,11 @@ configuration:
     name: Signal proxy token
     description: Optional bearer token for an authentication proxy.
   signal_account:
-    name: Signal bot number
+    name: Signal account number
     description: Detected automatically after QR linking in integrated mode.
+  signal_self_chat_enabled:
+    name: Use your Note to Self chat
+    description: Also processes self-messages explicitly addressed to the account itself; disabled by default.
   allowed_senders:
     name: Allowed Signal senders
   timezone:

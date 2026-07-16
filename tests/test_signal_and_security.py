@@ -13,7 +13,7 @@ from aiohttp import web
 from app.entity_control import EntityControlDenied
 from app.ha_client import HomeAssistantReadClient, ReadOnlyViolation
 from app.settings_ui import ingress_only, security_headers
-from app.signal_client import SignalClient
+from app.signal_client import SELF_REPLY_PREFIX, SignalClient
 from app.tools import TOOL_DEFINITIONS
 
 
@@ -466,6 +466,64 @@ class SignalParsingTests(unittest.TestCase):
         self.assertEqual(parsed[1:], ("+49111", "Hallo"))
         self.assertIsNone(client._parse(raw))  # noqa: SLF001
 
+    @staticmethod
+    def _self_sync(message: str, *, destination: str = "+49000") -> str:
+        return json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "receive",
+                "params": {
+                    "result": {
+                        "envelope": {
+                            "sourceNumber": "+49000",
+                            "timestamp": 20,
+                            "syncMessage": {
+                                "sentMessage": {
+                                    "destinationNumber": destination,
+                                    "message": message,
+                                    "timestamp": 20,
+                                }
+                            },
+                        }
+                    }
+                },
+            }
+        )
+
+    def test_note_to_self_requires_opt_in_and_exact_self_destination(self) -> None:
+        self.assertIsNone(  # disabled by default
+            self.client._parse(self._self_sync("Status"))  # noqa: SLF001
+        )
+        client = SignalClient(
+            base_url="http://signal:8080",
+            account="+49000",
+            api_token="",
+            allowed_senders=frozenset({"+49111"}),
+            self_chat_enabled=True,
+            session=None,  # type: ignore[arg-type]
+        )
+        parsed = client._parse(self._self_sync("Status"))  # noqa: SLF001
+        assert parsed is not None
+        self.assertEqual(parsed[1:], ("+49000", "Status"))
+        self.assertIsNone(  # outgoing chat to another contact is not a self-chat command
+            client._parse(self._self_sync("privat", destination="+49222"))  # noqa: SLF001
+        )
+
+    def test_agent_note_to_self_reply_cannot_trigger_a_loop(self) -> None:
+        client = SignalClient(
+            base_url="http://signal:8080",
+            account="+49000",
+            api_token="",
+            allowed_senders=frozenset(),
+            self_chat_enabled=True,
+            session=None,  # type: ignore[arg-type]
+        )
+        self.assertIsNone(
+            client._parse(  # noqa: SLF001
+                self._self_sync(f"{SELF_REPLY_PREFIX}eigene Antwort")
+            )
+        )
+
 
 class SignalSendingTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_is_whitelisted_authenticated_and_chunked(self) -> None:
@@ -481,6 +539,28 @@ class SignalSendingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(session.requests), 3)
         self.assertEqual(session.requests[0][0], "https://signal.example/proxy/v2/send")
         self.assertEqual(session.requests[0][2]["Authorization"], "Bearer proxy-token")
+        with self.assertRaises(PermissionError):
+            await client.send("+49999", "blocked")
+
+    async def test_note_to_self_is_prefixed_and_external_allowlist_still_applies(
+        self,
+    ) -> None:
+        session = FakePostSession()
+        client = SignalClient(
+            base_url="http://signal:8080",
+            account="+49000",
+            api_token="",
+            allowed_senders=frozenset({"+49111"}),
+            self_chat_enabled=True,
+            session=session,  # type: ignore[arg-type]
+        )
+        await client.send("+49000", "Status")
+        self.assertEqual(session.requests[0][1]["recipients"], ["+49000"])
+        self.assertEqual(
+            session.requests[0][1]["message"], f"{SELF_REPLY_PREFIX}Status"
+        )
+        await client.send("+49111", "Extern")
+        self.assertEqual(session.requests[1][1]["message"], "Extern")
         with self.assertRaises(PermissionError):
             await client.send("+49999", "blocked")
 

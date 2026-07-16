@@ -78,11 +78,13 @@ Im Standardmodus wird die Signal-Bridge innerhalb desselben Add-on-Containers ge
 1. In der Add-on-Seite **Weboberfläche öffnen** wählen.
 2. Unter Signal **Integriert – automatisch** auswählen.
 3. **Signal-Konto verbinden** anklicken.
-4. Den angezeigten QR-Code in der Signal-App des Bot-Kontos unter **Einstellungen → Verknüpfte Geräte** scannen.
-5. Sobald das Bot-Konto erkannt wurde, zeigt die Oberfläche einen Befehl wie `KOPPELN A1B2C3D4`.
-6. Diesen Befehl vom persönlichen Signal-Konto an den Bot senden. Die Absendernummer wird automatisch freigegeben und der Agent startet.
+4. Den angezeigten QR-Code in der Signal-App des gewünschten Kontos unter **Einstellungen → Verknüpfte Geräte** scannen.
+5. Für ein persönliches Konto **Eigenen Chat „Notiz an mich“ verwenden** aktivieren und speichern. Alternativ zeigt die Oberfläche einen Befehl wie `KOPPELN A1B2C3D4`.
+6. Den Kopplungsbefehl von einem anderen Signal-Konto senden, wenn zusätzliche Absender zugelassen werden sollen. Selbst-Chat und erlaubte Absender können gleichzeitig aktiv sein.
 
 Der Kopplungscode ist acht Hex-Zeichen lang, nur fünf Minuten gültig und wird ausschließlich in der admin-geschützten Ingress-Oberfläche angezeigt. Zusätzliche Absender lassen sich über **Weiteren Absender koppeln** freigeben. Die Verknüpfung bleibt nach Neustarts erhalten.
+
+Der Selbst-Chat ist standardmäßig deaktiviert. Der Agent akzeptiert dort ausschließlich Signal-Synchronisationsnachrichten, die eindeutig an die eigene Kontonummer adressiert sind. Andere selbst gesendete Unterhaltungen werden ignoriert. Agentenantworten im Selbst-Chat tragen eine feste Kennzeichnung und werden nicht erneut als Auftrag verarbeitet. Normale eingehende Chats bleiben auf `allowed_senders` begrenzt.
 
 **Signal lokal trennen** entfernt ausschließlich die lokale Geräteverknüpfung und alle Absenderfreigaben; das eigentliche Signal-Konto wird nicht gelöscht. Der alte Geräteeintrag kann anschließend zusätzlich in der Signal-App entfernt werden.
 
@@ -125,7 +127,8 @@ Auch eine erlaubte Aktion wird nur vorgeschlagen. Sie muss aus dem exakten Wortl
 | `signal_mode` | `integrated` für automatisches Onboarding oder `external` als Expertenmodus |
 | `signal_api_url` | Nur extern: URL der eigenen Signal-Bridge |
 | `signal_api_token` | Nur extern: optionaler Bearer-Token eines vorgeschalteten Reverse Proxys |
-| `signal_account` | Signal-Nummer des Bot-Kontos; integriert automatisch erkannt |
+| `signal_account` | Nummer des verbundenen Signal-Kontos; integriert automatisch erkannt |
+| `signal_self_chat_enabled` | Aktiviert zusätzlich den eigenen Chat „Notiz an mich“; standardmäßig `false` |
 | `allowed_senders` | Einzige Nummern, deren Nachrichten akzeptiert und an die Antworten gesendet werden |
 | `timezone` | Zeitzone für Cron-Ausdrücke |
 | `learning_enabled` | Aktiviert die lokale Wissensbasis und Verhaltensanalyse |
@@ -184,7 +187,7 @@ Home Assistant bietet Add-ons derzeit keinen fein gescopten Nur-Lese-Token. Das 
 - Schreibzugriffe betreffen ausschließlich eigene Laufzeitdaten in `/data`: Monitor-/Wissensdatenbank, UI-Einstellungen und Signal-Kontodaten.
 - Die Einstellungsoberfläche akzeptiert nur Verbindungen des Home-Assistant-Ingress-Proxys und ist auf Administratoren begrenzt.
 - Die integrierte Signal-Bridge besitzt keinen veröffentlichten Netzwerk-Port; QR-Code und Kopplung laufen nur über die Admin-Oberfläche.
-- Signal-Eingang und -Ausgang sind auf `allowed_senders` begrenzt; Monitore gehören dem Ersteller.
+- Signal-Eingang und -Ausgang sind auf `allowed_senders` sowie optional die eindeutig erkannte eigene „Notiz an mich“ begrenzt; Monitore gehören dem Ersteller.
 - Inhalte aus Logs, Konfigurationen und Events werden als nicht vertrauenswürdige Daten behandelt und vor Modellaufrufen lokal auf typische Secrets geprüft.
 - Dauerhafte Nutzererinnerungen müssen wortgleich aus der aktuellen, freigegebenen Signal-Nachricht stammen und sind nach Absender getrennt, mengenbegrenzt und mit einem Ablaufdatum versehen.
 - Dauerhafte Monitoränderungen benötigen eine vom Modell unabhängige, exakt passende Signal-Bestätigung und laufen nie aus proaktiven Agentläufen heraus.
@@ -192,6 +195,8 @@ Home Assistant bietet Add-ons derzeit keinen fein gescopten Nur-Lese-Token. Das 
 - Die Ausführung validiert Domain, Aktion, Entity, Wert und Modus erneut. Allgemeine Dienste und Konfigurations-/System-Domains sind nicht erreichbar.
 
 Der Supervisor-Token besitzt technisch mehr Rechte als der Adapter nutzt. Bei einer vollständigen Kompromittierung des Containerprozesses wäre diese programminterne Grenze nicht mit einem serverseitig gescopten Token gleichzusetzen. Das Add-on sollte daher geschützt und aktuell gehalten werden. Home-Assistant-Backups enthalten außerdem die unter `/data/signal-cli` gespeicherten Signal-Geräteschlüssel und müssen entsprechend vertraulich behandelt werden.
+
+Wird das persönliche Signal-Konto verknüpft, empfängt das verknüpfte Gerät technisch auch die für dieses Konto zugestellten Nachrichten. Der Agent verwirft nicht freigegebene Chats vor einem OpenAI-Aufruf, dennoch erhöht ein persönliches Konto die Auswirkungen einer vollständigen Container-Kompromittierung. Ein separates Signal-Konto bleibt deshalb die datenschutzfreundlichere Variante.
 
 Eine erlaubte Geräteaktion kann vorhandene Home-Assistant-Automationen indirekt auslösen, weil diese auf Zustandsänderungen reagieren können. Der Agent kann solche Automationen weder bearbeiten noch direkt starten. Schlösser, Sirenen, Heizungen oder andere sicherheitsrelevante Geräte sollten deshalb nur nach bewusster Einzelprüfung in die verpflichtende Entity-Freigabeliste aufgenommen werden.
 

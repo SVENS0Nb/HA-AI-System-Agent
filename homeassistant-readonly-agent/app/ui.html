@@ -45,8 +45,8 @@
           <button id="signalUnlink" class="danger" type="button">Signal lokal trennen</button>
         </div>
         <div id="signalQrPanel" class="onboarding" hidden>
-          <img id="signalQr" class="signal-qr" alt="QR-Code zum Verknüpfen des Signal-Bot-Kontos" width="256" height="256">
-          <p>In der Signal-App des Bot-Kontos unter <strong>Einstellungen → Verknüpfte Geräte</strong> scannen.</p>
+          <img id="signalQr" class="signal-qr" alt="QR-Code zum Verknüpfen des Signal-Kontos" width="256" height="256">
+          <p>In der Signal-App des gewünschten Kontos unter <strong>Einstellungen → Verknüpfte Geräte</strong> scannen.</p>
         </div>
         <div id="signalPairPanel" class="onboarding" hidden>
           <p>Sende von deinem persönlichen Signal-Konto exakt:</p>
@@ -61,7 +61,9 @@
         <label class="check"><input id="clear_signal_api_token" type="checkbox">Gespeicherten Signal-Token löschen</label>
       </div>
 
-      <div class="field"><label for="signal_account">Bot-Nummer</label><input id="signal_account" placeholder="Wird nach dem QR-Scan automatisch erkannt"><small id="signalAccountHint">Im integrierten Modus automatisch erkannt.</small></div>
+      <div class="field"><label for="signal_account">Signal-Kontonummer</label><input id="signal_account" placeholder="Wird nach dem QR-Scan automatisch erkannt"><small id="signalAccountHint">Im integrierten Modus automatisch erkannt.</small></div>
+      <label class="check"><input id="signal_self_chat_enabled" type="checkbox"><span>Eigenen Chat „Notiz an mich“ verwenden</span></label>
+      <small>Standardmäßig ausgeschaltet. Nur eindeutig an die eigene Nummer gesendete Selbstnachrichten werden verarbeitet; normale Unterhaltungen bleiben auf die Absenderliste begrenzt.</small>
       <div class="field"><label for="allowed_senders">Erlaubte Absender</label><textarea id="allowed_senders" placeholder="Wird durch den Kopplungscode automatisch ergänzt"></textarea><small>Gekoppelte Nummern dürfen mit dem Agenten chatten. Zusätzliche Nummern können weiterhin manuell ergänzt werden.</small></div>
     </section>
 

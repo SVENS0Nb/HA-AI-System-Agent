@@ -80,6 +80,7 @@ async def run_agent_runtime(
                 account=settings.signal_account,
                 api_token=settings.signal_api_token,
                 allowed_senders=settings.allowed_senders,
+                self_chat_enabled=settings.signal_self_chat_enabled,
                 session=session,
                 claim_message=storage.receive_signal_message,
             )
@@ -137,7 +138,7 @@ async def run_agent_runtime(
                     recipients = await asyncio.to_thread(
                         storage.pending_anomaly_recipients,
                         str(anomaly["id"]),
-                        settings.allowed_senders,
+                        settings.signal_recipients,
                     )
                     for recipient in recipients:
                         try:
@@ -173,7 +174,7 @@ async def run_agent_runtime(
                 await behavior.start()
 
             async def announce_startup() -> None:
-                pending = set(settings.allowed_senders)
+                pending = set(settings.signal_recipients)
                 delay = 2
                 while pending:
                     for recipient in list(pending):
@@ -410,7 +411,7 @@ async def run() -> None:
                 running=True,
                 messages=[
                     "Agentprozess ist aktiv; Verbindungen können unten einzeln getestet werden.",
-                    f"Modell: {settings.openai_model}; Reasoning: {settings.reasoning_mode if settings.reasoning_mode == 'auto' else settings.reasoning_effort}; Lernen: {'aktiv' if settings.learning_enabled else 'aus'}; Gerätesteuerung: {'aktiv' if settings.entity_control_enabled else 'aus'}; Zeitzone: {settings.timezone}; Signal: {settings.signal_mode}",
+                    f"Modell: {settings.openai_model}; Reasoning: {settings.reasoning_mode if settings.reasoning_mode == 'auto' else settings.reasoning_effort}; Lernen: {'aktiv' if settings.learning_enabled else 'aus'}; Gerätesteuerung: {'aktiv' if settings.entity_control_enabled else 'aus'}; Zeitzone: {settings.timezone}; Signal: {settings.signal_mode}; Notiz an mich: {'aktiv' if settings.signal_self_chat_enabled else 'aus'}",
                 ],
             )
             reload_waiter = asyncio.create_task(reload_event.wait())

@@ -15,6 +15,7 @@ import aiohttp
 from .redaction import redact_text
 
 LOGGER = logging.getLogger(__name__)
+SELF_REPLY_PREFIX = "🤖 HA AI System Agent\n"
 
 
 class SignalClient:
@@ -25,12 +26,14 @@ class SignalClient:
         account: str,
         api_token: str,
         allowed_senders: frozenset[str],
+        self_chat_enabled: bool = False,
         session: aiohttp.ClientSession,
         claim_message: Callable[[str, str, str], bool] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._account = account
         self._allowed_senders = allowed_senders
+        self._self_chat_enabled = self_chat_enabled
         self._session = session
         self._headers = {"Authorization": f"Bearer {api_token}"} if api_token else {}
         self._seen: deque[str] = deque(maxlen=500)
@@ -38,12 +41,17 @@ class SignalClient:
         self._claim_message = claim_message
 
     async def send(self, recipient: str, message: str) -> None:
-        if recipient not in self._allowed_senders:
+        is_self_chat = self._self_chat_enabled and recipient == self._account
+        if recipient not in self._allowed_senders and not is_self_chat:
             raise PermissionError("Signal recipient is not in allowed_senders")
+        chunk_size = 3500 - (len(SELF_REPLY_PREFIX) if is_self_chat else 0)
         chunks = [
-            message[index : index + 3500] for index in range(0, len(message), 3500)
+            message[index : index + chunk_size]
+            for index in range(0, len(message), chunk_size)
         ] or ["(empty)"]
         for chunk in chunks:
+            if is_self_chat:
+                chunk = f"{SELF_REPLY_PREFIX}{chunk}"
             payload = {
                 "message": chunk,
                 "number": self._account,
@@ -126,11 +134,56 @@ class SignalClient:
                     envelope = result.get("envelope")
         if not isinstance(envelope, dict):
             return None
-        data = envelope.get("dataMessage")
-        if not isinstance(data, dict) or not isinstance(data.get("message"), str):
-            return None
         sender = str(envelope.get("sourceNumber") or envelope.get("source") or "")
-        if sender not in self._allowed_senders:
+        data = envelope.get("dataMessage")
+        if isinstance(data, dict) and isinstance(data.get("message"), str):
+            if sender not in self._allowed_senders:
+                LOGGER.warning(
+                    "Ignored Signal message from non-whitelisted sender %s",
+                    sender or "<unknown>",
+                )
+                return None
+            return self._accept_message(envelope, data, sender)
+
+        self_message = self._self_message(envelope, sender)
+        if self_message is None:
+            return None
+        return self._accept_message(envelope, self_message, self._account)
+
+    def _self_message(
+        self, envelope: dict[str, Any], sender: str
+    ) -> dict[str, Any] | None:
+        """Return a user-authored Note to Self sync message, never other sent chats."""
+        if not self._self_chat_enabled or sender != self._account:
+            return None
+        sync_message = envelope.get("syncMessage")
+        if not isinstance(sync_message, dict):
+            return None
+        sent_message = sync_message.get("sentMessage")
+        if not isinstance(sent_message, dict):
+            return None
+        destination = str(
+            sent_message.get("destinationNumber")
+            or sent_message.get("destination")
+            or ""
+        )
+        message = sent_message.get("message")
+        if destination != self._account or not isinstance(message, str):
+            return None
+        if message.startswith(SELF_REPLY_PREFIX):
+            LOGGER.debug("Ignored the agent's own Note to Self reply")
+            return None
+        return sent_message
+
+    def _accept_message(
+        self,
+        envelope: dict[str, Any],
+        data: dict[str, Any],
+        sender: str,
+    ) -> tuple[str, str, str] | None:
+        if sender not in self._allowed_senders and not (
+            self._self_chat_enabled and sender == self._account
+        ):
             LOGGER.warning(
                 "Ignored Signal message from non-whitelisted sender %s",
                 sender or "<unknown>",
