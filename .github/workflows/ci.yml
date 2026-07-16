@@ -38,3 +38,45 @@ jobs:
         run: bandit -q -r homeassistant-readonly-agent/app
       - name: Dependency audit
         run: pip-audit -r homeassistant-readonly-agent/requirements.txt --disable-pip
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Build app image
+        run: |
+          docker build \
+            --build-arg BUILD_VERSION=ci \
+            --build-arg BUILD_ARCH=amd64 \
+            --tag ha-ai-system-agent:ci \
+            homeassistant-readonly-agent
+      - name: Start integrated Signal bridge
+        run: |
+          set -eu
+          docker run --detach \
+            --name ha-ai-signal-smoke \
+            --entrypoint /usr/local/bin/signal-bridge-entrypoint \
+            ha-ai-system-agent:ci
+          cleanup() {
+            docker logs ha-ai-signal-smoke || true
+            docker rm --force ha-ai-signal-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          ready=false
+          for _attempt in $(seq 1 60); do
+            if docker exec ha-ai-signal-smoke \
+              curl --fail --silent --show-error http://127.0.0.1:8080/v1/health
+            then
+              ready=true
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' ha-ai-signal-smoke)" != "true" ]; then
+              break
+            fi
+            sleep 2
+          done
+          [ "$ready" = "true" ]
+          docker exec ha-ai-signal-smoke \
+            supervisorctl -c /etc/supervisor/signal-bridge.conf status

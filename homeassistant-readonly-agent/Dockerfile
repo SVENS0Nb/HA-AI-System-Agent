@@ -40,7 +40,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 USER root
 
-RUN install -m 0755 /entrypoint.sh /usr/local/bin/signal-bridge-entrypoint \
+COPY signal-bridge-entrypoint.sh /usr/local/bin/signal-bridge-entrypoint
+COPY signal-api.conf /etc/supervisor/conf.d/signal-api.conf
+COPY signal-supervisord.conf /etc/supervisor/signal-bridge.conf
+
+RUN chmod 0755 /usr/local/bin/signal-bridge-entrypoint \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 python3-venv tzdata \
     && rm -rf /var/lib/apt/lists/* \

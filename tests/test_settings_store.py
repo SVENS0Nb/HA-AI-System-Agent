@@ -151,6 +151,19 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertIn("Zugangsdaten", errors)
         self.assertIn("Bot-Nummer", errors)
 
+    def test_integrated_signal_onboarding_uses_actionable_messages(self) -> None:
+        settings = self.store.update(
+            {
+                "signal_mode": "integrated",
+                "signal_account": "",
+                "allowed_senders": [],
+            }
+        )
+        errors = settings.signal_validation_errors()
+        self.assertIn("Signal-Konto ist noch nicht per QR-Code verbunden.", errors)
+        self.assertIn("Noch kein persönlicher Signal-Absender gekoppelt.", errors)
+        self.assertNotIn("Signal-Bot-Nummer", " ".join(errors))
+
     def test_extended_reasoning_levels_are_supported(self) -> None:
         self.assertEqual(
             self.store.update({"reasoning_effort": "xhigh"}).openai_validation_errors(),

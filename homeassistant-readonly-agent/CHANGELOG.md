@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.2
+
+- Signal-API und `signal-cli` laufen gemeinsam unter einem einzigen Vordergrund-Supervisor, sodass Neustarts keine verwaisten Prozesse zurücklassen
+- Gleichzeitige Start-, Status- und QR-Anfragen warten auf denselben Bridge-Start, statt ihn vorzeitig abzubrechen
+- Kontrollierte Wiederherstellung einer später ungesund gewordenen Signal-Bridge nach der Startphase
+- Geschwärzte letzte Prozessausgabe in der UI bei Startfehlern statt eines alleinstehenden Exit-Codes
+- Verständliche Onboarding-Hinweise für das noch nicht verbundene Bot-Konto und den noch nicht gekoppelten Absender
+
 ## 0.7.1
 
 - Signal-Eingänge und vorbereitete Antworten bleiben bis zur bestätigten Zustellung dauerhaft erhalten

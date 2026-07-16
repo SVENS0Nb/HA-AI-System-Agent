@@ -276,6 +276,7 @@ async def run_agent_runtime(
                         continue
                     LOGGER.warning("Integrated Signal bridge is unhealthy; recovering")
                     try:
+                        await signal_bridge.restart()
                         await signal_bridge.wait_until_ready()
                     except asyncio.CancelledError:
                         raise

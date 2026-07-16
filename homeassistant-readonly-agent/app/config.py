@@ -246,12 +246,18 @@ class Settings:
                     "Signal-API-URL darf keine Zugangsdaten, Query-Parameter oder Fragmente enthalten."
                 )
         e164 = re.compile(r"^\+[1-9]\d{6,14}$")
-        if not e164.fullmatch(self.signal_account):
+        if not self.signal_account and self.signal_mode == "integrated":
+            errors.append("Signal-Konto ist noch nicht per QR-Code verbunden.")
+        elif not e164.fullmatch(self.signal_account):
             errors.append(
                 "Signal-Bot-Nummer muss im E.164-Format vorliegen, z. B. +49123456789."
             )
         if not self.allowed_senders:
-            errors.append("Mindestens ein erlaubter Signal-Absender ist erforderlich.")
+            errors.append(
+                "Noch kein persönlicher Signal-Absender gekoppelt."
+                if self.signal_mode == "integrated"
+                else "Mindestens ein erlaubter Signal-Absender ist erforderlich."
+            )
         elif invalid := sorted(
             sender for sender in self.allowed_senders if not e164.fullmatch(sender)
         ):
