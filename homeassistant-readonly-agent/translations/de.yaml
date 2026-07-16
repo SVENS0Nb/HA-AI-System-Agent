@@ -1,0 +1,47 @@
+configuration:
+  openai_api_key:
+    name: OpenAI API-Key
+    description: Kann alternativ in der Weboberfläche des Add-ons gespeichert werden.
+  openai_model:
+    name: OpenAI-Modell
+  reasoning_effort:
+    name: Reasoning-Stufe
+  signal_api_url:
+    name: Signal-API-URL
+    description: Interne HTTP(S)-Adresse der signal-cli-rest-api.
+  signal_api_token:
+    name: Signal-Proxy-Token
+    description: Optionaler Bearer-Token eines vorgeschalteten Auth-Proxys.
+  signal_account:
+    name: Signal-Bot-Nummer
+  allowed_senders:
+    name: Erlaubte Signal-Absender
+  timezone:
+    name: Zeitzone
+  allow_sensitive_config:
+    name: Sensible Konfiguration freigeben
+    description: Nicht empfohlen; erlaubt das Lesen von Secrets und Auth-Dateien.
+  startup_message:
+    name: Startmeldung senden
+  conversation_messages:
+    name: Chat-Kontextgröße
+  max_config_file_kb:
+    name: Maximale Config-Dateigröße
+  default_log_lines:
+    name: Standardanzahl Logzeilen
+  openai_timeout_seconds:
+    name: OpenAI-Zeitlimit in Sekunden
+  max_output_tokens:
+    name: Maximale Ausgabe-Tokens
+  max_tool_rounds:
+    name: Maximale Werkzeugrunden
+  max_parallel_agent_runs:
+    name: Parallele Agentläufe
+  message_retention_days:
+    name: Chat-Aufbewahrung in Tagen
+  max_messages_per_sender:
+    name: Maximale Nachrichten pro Absender
+  max_monitors_per_sender:
+    name: Maximale Monitore pro Absender
+  reconcile_interval_seconds:
+    name: Statusabgleich in Sekunden

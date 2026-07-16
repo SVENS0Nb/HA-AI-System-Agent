@@ -1,0 +1,73 @@
+name: "Home Assistant Read-only Agent"
+version: "0.3.1"
+slug: "homeassistant_readonly_agent"
+description: >-
+  Read-only OpenAI agent for Home Assistant with Signal chat and persistent monitors.
+arch:
+  - amd64
+  - aarch64
+startup: application
+boot: auto
+init: false
+stage: experimental
+apparmor: true
+backup: cold
+tmpfs: true
+watchdog: "http://[HOST]:[PORT:8099]/healthz"
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:home-analytics
+panel_title: HA Read-only Agent
+panel_admin: true
+homeassistant_api: true
+hassio_api: true
+hassio_role: homeassistant
+map:
+  - type: homeassistant_config
+    read_only: true
+    path: /homeassistant_config
+options:
+  openai_api_key: ""
+  openai_model: "gpt-5.6-luna"
+  reasoning_effort: "low"
+  signal_api_url: "http://signal-cli-rest-api:8080"
+  signal_api_token: ""
+  signal_account: ""
+  allowed_senders: []
+  timezone: "Europe/Berlin"
+  allow_sensitive_config: false
+  startup_message: true
+  conversation_messages: 12
+  max_config_file_kb: 192
+  default_log_lines: 500
+  openai_timeout_seconds: 90
+  max_output_tokens: 1800
+  max_tool_rounds: 8
+  max_parallel_agent_runs: 2
+  message_retention_days: 30
+  max_messages_per_sender: 500
+  max_monitors_per_sender: 50
+  reconcile_interval_seconds: 60
+schema:
+  openai_api_key: password
+  openai_model: str
+  reasoning_effort: list(none|low|medium|high|xhigh|max)
+  signal_api_url: url
+  signal_api_token: password
+  signal_account: str
+  allowed_senders:
+    - str
+  timezone: str
+  allow_sensitive_config: bool
+  startup_message: bool
+  conversation_messages: int(2,30)
+  max_config_file_kb: int(16,1024)
+  default_log_lines: int(50,5000)
+  openai_timeout_seconds: int(15,300)
+  max_output_tokens: int(256,4096)
+  max_tool_rounds: int(2,12)
+  max_parallel_agent_runs: int(1,4)
+  message_retention_days: int(1,365)
+  max_messages_per_sender: int(20,5000)
+  max_monitors_per_sender: int(1,200)
+  reconcile_interval_seconds: int(30,900)
