@@ -95,6 +95,13 @@ class AddonMetadataTests(unittest.TestCase):
         )
         self.assertIn("exec /usr/bin/supervisord -n", entrypoint)
         self.assertNotIn("service supervisor start", entrypoint)
+        self.assertIn('MODE:-}" != "json-rpc-native"', entrypoint)
+        self.assertIn("runtime_tmp=/run/ha-ai-signal", entrypoint)
+        self.assertIn(
+            "command=signal-cli-native -Djava.io.tmpdir=$runtime_tmp",
+            entrypoint,
+        )
+        self.assertIn('TMPDIR="/run/ha-ai-signal"', entrypoint)
         self.assertTrue((addon / "signal-api.conf").is_file())
         self.assertTrue((addon / "signal-supervisord.conf").is_file())
         self.assertIn("python3-venv tzdata", dockerfile)
