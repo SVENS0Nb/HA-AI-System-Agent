@@ -24,6 +24,11 @@ class EventHomeAssistant(FakeHomeAssistant):
         await asyncio.Event().wait()
 
 
+class MissingHomeAssistant(FakeHomeAssistant):
+    async def states(self) -> list[dict[str, Any]]:
+        return []
+
+
 class MonitorServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -136,6 +141,41 @@ class MonitorServiceTests(unittest.IsolatedAsyncioTestCase):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             await service.stop()
+
+    async def test_missing_monitored_entity_counts_as_unavailable(self) -> None:
+        service = MonitorService(
+            self.storage,
+            MissingHomeAssistant(),  # type: ignore[arg-type]
+            "Europe/Berlin",
+        )
+        contexts: list[dict[str, Any]] = []
+
+        async def callback(monitor: dict[str, Any], context: dict[str, Any]) -> None:
+            del monitor
+            contexts.append(context)
+
+        service.set_run_callback(callback)
+        self.storage.add_monitor(
+            name="removed entity",
+            kind="entity",
+            spec={
+                "entity_ids": ["sensor.removed"],
+                "problem_states": ["unavailable"],
+                "for_seconds": 0,
+                "cooldown_seconds": 0,
+            },
+            task="notify",
+            recipient="+49111",
+        )
+        service.refresh_cron_jobs()
+        await service._reconcile_entity_monitors()  # noqa: SLF001
+        for _ in range(20):
+            if contexts:
+                break
+            await asyncio.sleep(0.01)
+        self.assertTrue(contexts)
+        self.assertTrue(contexts[0]["entity_missing_when_observed"])
+        await service.stop()
 
 
 if __name__ == "__main__":

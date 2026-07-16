@@ -1,19 +1,19 @@
-# Home Assistant Read-only Agent
+# HA AI System Agent
 
 <p align="center">
-  <img src="./homeassistant-readonly-agent/logo.png" alt="Home Assistant Read-only Agent Logo" width="160">
+  <img src="./homeassistant-readonly-agent/logo.png" alt="HA AI System Agent Logo" width="160">
 </p>
 
-Ein Home-Assistant-Add-on, in dem ein OpenAI-Agent lebt, per Signal chattet und Home Assistant überwacht. Der Agent darf Zustände, Verlauf, Konfigurationen und Logs lesen. Er kann eigene persistente Cron-, Entity- und Event-Monitore anlegen, aber **keine Home-Assistant-Zustände oder Dateien verändern**.
+Ein Home-Assistant-Add-on, in dem ein OpenAI-Agent lebt, per Signal chattet und Home Assistant überwacht. Der Agent darf Zustände, Verlauf, Konfigurationen und Logs lesen. Optional kann eine streng begrenzte, separat bestätigte Geräte-/Entity-Steuerung aktiviert werden. **Automationen, Skripte, Szenen, Systemfunktionen und Konfigurationsdateien bleiben unveränderbar.**
 
 Status: experimentelle, gehärtete Version für Home Assistant OS/Supervised auf `amd64` und `aarch64`.
 
 ```mermaid
 flowchart LR
-    U["Freigegebener Signal-Nutzer"] <-->|"Ende-zu-Ende verschlüsselt"| S["signal-cli-rest-api"]
-    S <-->|"WebSocket + REST im privaten Netz"| A["Read-only Agent Add-on"]
+    U["Gekoppelter Signal-Nutzer"] <-->|"Ende-zu-Ende verschlüsselt"| B["Integrierte Signal-Bridge"]
+    B <-->|"nur Loopback im Container"| A["HA AI System Agent"]
     A -->|"Responses API + begrenzte Tools"| O["OpenAI API"]
-    A -->|"GET, get_states, subscribe_events"| H["Home Assistant + Supervisor"]
+    A -->|"Lesen + optional bestätigte Entity-Aktion"| H["Home Assistant + Supervisor"]
     H -->|"Zustände, Events, Logs"| A
     C["/homeassistant_config read-only"] --> A
     A --> D["Eigene SQLite-DB in /data"]
@@ -22,6 +22,8 @@ flowchart LR
 ## Was bereits funktioniert
 
 - Signal-Nachrichten von einer Whitelist empfangen und beantworten
+- Signal-Konto per QR-Code direkt in der Admin-Oberfläche verbinden
+- Persönliche Absender mit einem fünf Minuten gültigen Einmalcode koppeln
 - Eigene Home-Assistant-Weboberfläche für sämtliche Einstellungen und Verbindungstests
 - Aktuelle Entities suchen und Zustände/Attribute lesen
 - Kompakten Entity-Verlauf bis sieben Tage lesen
@@ -31,39 +33,22 @@ flowchart LR
 - Mehrere Geräte auf `unavailable`, `unknown` oder andere Zustände überwachen
 - Beliebige Home-Assistant-Events mit einfachen Datenfiltern abonnieren
 - Monitore auflisten, deaktivieren, aktivieren und löschen
+- Wichtige Aussagen des jeweiligen Signal-Nutzers in einer begrenzten lokalen Wissensbasis behalten
+- Pro Entity lokale Verhaltens-Baselines bilden und auffällige Werte, häufige Zustandswechsel oder anhaltende Ausfälle melden
+- Optionale Geräte-/Entity-Steuerung mit fester Domain-/Aktionsliste, verpflichtender Entity-Allowlist und separatem Signal-Code
 - Neustarts überstehen; Monitore liegen in `/data/agent.sqlite3`
 
-Nicht enthalten sind Schreibwerkzeuge, Shell-Zugriff, Service Calls, Event-Auslösung, Dateiänderungen oder Home-Assistant-Neustarts.
+Nicht enthalten sind allgemeine Service Calls, Shell-Zugriff, Event-Auslösung, Dateiänderungen, Home-Assistant-/Add-on-Neustarts oder Schreibzugriffe auf Automationen, Skripte, Szenen und Helfer.
 
 ## Voraussetzungen
 
 - Home Assistant OS oder eine Supervised-Installation mit Add-on-Unterstützung
 - Ein OpenAI-API-Key. Ein ChatGPT-Abonnement allein ist kein API-Guthaben.
-- Eine erreichbare [`signal-cli-rest-api`](https://github.com/bbernhard/signal-cli-rest-api)-Instanz im privaten Netz, bevorzugt im JSON-RPC-Modus
 - Sinnvollerweise ein eigenes Signal-Konto für den Bot
 
 Signal stellt keine offizielle Bot-API bereit. `signal-cli` und der REST-Wrapper sind Community-Projekte; Änderungen bei Signal können die Verbindung vorübergehend unterbrechen.
 
-## 1. Signal-Bridge bereitstellen
-
-Ein minimales Docker-Compose-Beispiel auf einem NAS, Server oder einer anderen vertrauenswürdigen Maschine:
-
-```yaml
-services:
-  signal-api:
-    image: bbernhard/signal-cli-rest-api:latest
-    restart: unless-stopped
-    environment:
-      MODE: json-rpc
-    ports:
-      - "192.168.1.20:8080:8080"
-    volumes:
-      - ./signal-data:/home/.local/share/signal-cli
-```
-
-Die API darf nicht ungeschützt aus dem Internet erreichbar sein. Das Signal-Konto wird nach Anleitung des REST-Projekts registriert oder als Gerät verknüpft. Zum Verknüpfen liefert `GET /v1/qrcodelink?device_name=HomeAssistant-Agent` einen QR-Code, den man in Signal unter **Einstellungen → Verknüpfte Geräte** scannt.
-
-## 2. Add-on installieren
+## 1. Add-on installieren
 
 Für die normale Installation diese Repository-URL unter **App-Store → Repositories** hinzufügen:
 
@@ -71,7 +56,7 @@ Für die normale Installation diese Repository-URL unter **App-Store → Reposit
 https://github.com/SVENS0Nb/HA-AI-System-Agent
 ```
 
-Danach im App-Store nach **HA AI System Agent** beziehungsweise **Home Assistant Read-only Agent** suchen und die App installieren.
+Danach im App-Store nach **HA AI System Agent** suchen und die App installieren.
 
 ### Lokale Installation
 
@@ -79,12 +64,29 @@ Für einen ersten Test den Unterordner [`homeassistant-readonly-agent`](./homeas
 
 1. **Einstellungen → Apps → App-Store** öffnen.
 2. Im Menü **Nach Updates suchen** wählen.
-3. Unter **Lokale Apps** den **Home Assistant Read-only Agent** öffnen und installieren.
+3. Unter **Lokale Apps** den **HA AI System Agent** öffnen und installieren.
 4. Das Add-on starten; eine unvollständige Konfiguration startet zunächst nur die sichere Einstellungsoberfläche.
 5. **Weboberfläche öffnen** wählen und dort Signal, OpenAI, Datenschutz und Laufzeit konfigurieren.
 6. **Einstellungen speichern** und anschließend die drei Verbindungstests ausführen.
 
 Das Repository enthält bereits die für den Home-Assistant-App-Store erforderliche `repository.yaml` mit der öffentlichen Projektadresse.
+
+## 2. Signal automatisch verbinden
+
+Im Standardmodus wird die Signal-Bridge innerhalb desselben Add-on-Containers gestartet. Sie ist nur über `127.0.0.1` erreichbar; es wird kein Signal-Port in das Heimnetz oder Internet veröffentlicht.
+
+1. In der Add-on-Seite **Weboberfläche öffnen** wählen.
+2. Unter Signal **Integriert – automatisch** auswählen.
+3. **Signal-Konto verbinden** anklicken.
+4. Den angezeigten QR-Code in der Signal-App des Bot-Kontos unter **Einstellungen → Verknüpfte Geräte** scannen.
+5. Sobald das Bot-Konto erkannt wurde, zeigt die Oberfläche einen Befehl wie `KOPPELN A1B2C3D4`.
+6. Diesen Befehl vom persönlichen Signal-Konto an den Bot senden. Die Absendernummer wird automatisch freigegeben und der Agent startet.
+
+Der Kopplungscode ist acht Hex-Zeichen lang, nur fünf Minuten gültig und wird ausschließlich in der admin-geschützten Ingress-Oberfläche angezeigt. Zusätzliche Absender lassen sich über **Weiteren Absender koppeln** freigeben. Die Verknüpfung bleibt nach Neustarts erhalten.
+
+**Signal lokal trennen** entfernt ausschließlich die lokale Geräteverknüpfung und alle Absenderfreigaben; das eigentliche Signal-Konto wird nicht gelöscht. Der alte Geräteeintrag kann anschließend zusätzlich in der Signal-App entfernt werden.
+
+Unter **Externe Bridge – Expertenmodus** kann weiterhin eine selbst betriebene `signal-cli-rest-api` verwendet werden. Nur in diesem Modus werden API-URL und optionaler Proxy-Token benötigt.
 
 ## 3. Einstellungsoberfläche
 
@@ -94,18 +96,44 @@ API-Keys und Proxy-Tokens werden nie wieder an den Browser zurückgegeben. Ein l
 
 Die native Registerkarte **Konfiguration** bleibt als Fallback erhalten. Werte aus der eigenen Weboberfläche haben Vorrang.
 
+Die Reasoning-Steuerung arbeitet standardmäßig adaptiv. Sie bewertet ausschließlich den aktuellen Benutzerauftrag beziehungsweise die gespeicherte Monitoraufgabe. Nicht vertrauenswürdige Inhalte aus Logs, Konfigurationsdateien oder Eventdaten dürfen die Reasoning-Stufe nicht bestimmen. Aufwendige Werkzeuge und Werkzeugfehler können den nachfolgenden Modellaufruf strukturell bis maximal `high` hochstufen. Die Einstufung selbst läuft lokal und erzeugt deshalb keine zusätzliche OpenAI-Anfrage.
+
+### Lokales Lernen und Wissensbasis
+
+Wenn **Lokales Lernen** aktiviert ist, verarbeitet das Add-on `state_changed`-Ereignisse zu kompakten statistischen Baselines. Numerische Sensoren erhalten einen gleitenden Mittelwert und eine Streuung; nichtnumerische Entities werden auf ungewöhnlich häufige Zustandswechsel und anhaltendes `unavailable`/`unknown` geprüft. Rohereignisse werden dafür nicht dauerhaft als Lernhistorie gespeichert. Erst nach einer vom Empfindlichkeitsprofil abhängigen Aufwärmphase und einem lokalen Schwellwerttest wird der OpenAI-Agent zur Einordnung aufgerufen und gegebenenfalls eine Signal-Nachricht gesendet.
+
+Die Wissensbasis ist pro freigegebenem Signal-Absender getrennt. Der Agent darf ausschließlich einen exakten Ausschnitt der gerade authentifiziert empfangenen Nutzernachricht speichern – niemals Anweisungen aus Logs, Konfigurationsdateien, Events, Werkzeugergebnissen oder eigenen Antworten. Er wählt für geeignete Präferenzen, Korrekturen, beschriebenes Normalverhalten und wichtigen Kontext eine Wichtigkeit sowie eine begrenzte Lebensdauer. Abgelaufene Einträge werden automatisch gelöscht; ein Nutzer kann einen Eintrag jederzeit mit einer ausdrücklichen Bitte wie „Vergiss …“ entfernen lassen. Routinegespräche sollen nicht dauerhaft gespeichert werden.
+
+Das Lernen ist eine heuristische Entscheidungshilfe, kein Beweis für einen Defekt. Neue oder selten geänderte Entities benötigen zunächst genügend Beobachtungen. Die Stufen **Konservativ**, **Ausgewogen** und **Empfindlich** steuern Aufwärmphase und Meldeschwellen; bei Fehlalarmen sollte zunächst eine konservativere Stufe gewählt werden.
+
+### Optionale Geräte- und Entity-Steuerung
+
+Die Gerätesteuerung ist nach Installation und Update ausgeschaltet. In der Admin-Oberfläche kann **Bestätigte Gerätesteuerung aktivieren** gewählt werden; dabei muss mindestens eine konkrete Entity-ID freigegeben sein. Eine leere Liste erlaubt keine Aktion. Unterstützt werden ausschließlich die fest definierten Aktionen der Domains `light`, `switch`, `fan`, `cover`, `climate`, `humidifier`, `media_player`, `vacuum`, `lock`, `siren`, `valve`, `water_heater`, `number` und `select`.
+
+Der Agent kann keinen Domain- oder Servicenamen frei erfinden. Jede Kombination aus Domain, Aktion und Parameter wird durch eine lokale feste Zuordnung geprüft; numerische Werte müssen innerhalb globaler und – sofern vorhanden – der von der Entity gemeldeten Grenzen liegen. Modi und Optionen müssen von der Entity aktuell angeboten werden. `automation`, `script`, `scene`, `button`, `input_*`, `alarm_control_panel`, `update`, `homeassistant`, Supervisor-/Add-on-Dienste sowie Dateioperationen sind nicht Teil dieses Steuerpfads.
+
+Auch eine erlaubte Aktion wird nur vorgeschlagen. Sie muss aus dem exakten Wortlaut der aktuellen authentifizierten Signal-Nachricht hervorgehen und wird erst durch eine zweite Nachricht `BESTÄTIGEN <Code>` ausgeführt. Beim Bestätigen werden UI-Freigabe, Entity-Allowlist, Domain, Aktion und aktuelle Parametergrenzen erneut geprüft. Proaktive Monitore, Lernereignisse, Logs, Konfigurationen und Werkzeugausgaben können keine Geräteaktion ausführen oder bestätigen.
+
 ## 4. Optionen
 
 | Option | Bedeutung |
 |---|---|
 | `openai_api_key` | API-Key von OpenAI |
 | `openai_model` | Modell-ID; voreingestellt ist `gpt-5.6-luna` |
-| `reasoning_effort` | `none`, `low`, `medium`, `high`, `xhigh` oder `max` |
-| `signal_api_url` | Interne URL der Signal-Bridge, z. B. `http://192.168.1.20:8080` |
-| `signal_api_token` | Optionaler Bearer-Token eines vorgeschalteten Reverse Proxys |
-| `signal_account` | Signal-Nummer des Bot-Kontos im E.164-Format |
+| `reasoning_mode` | `auto` wählt ohne weiteren API-Aufruf je nach Aufgabe `none` bis `high`; `fixed` nutzt eine feste Stufe |
+| `reasoning_effort` | Feste Stufe bei `reasoning_mode: fixed`: `none`, `low`, `medium`, `high`, `xhigh` oder `max` |
+| `signal_mode` | `integrated` für automatisches Onboarding oder `external` als Expertenmodus |
+| `signal_api_url` | Nur extern: URL der eigenen Signal-Bridge |
+| `signal_api_token` | Nur extern: optionaler Bearer-Token eines vorgeschalteten Reverse Proxys |
+| `signal_account` | Signal-Nummer des Bot-Kontos; integriert automatisch erkannt |
 | `allowed_senders` | Einzige Nummern, deren Nachrichten akzeptiert und an die Antworten gesendet werden |
 | `timezone` | Zeitzone für Cron-Ausdrücke |
+| `learning_enabled` | Aktiviert die lokale Wissensbasis und Verhaltensanalyse |
+| `anomaly_sensitivity` | `conservative`, `balanced` oder `sensitive` für Aufwärmphase und Auffälligkeitsschwellen |
+| `memory_retention_days` | Globale maximale Lebensdauer von Erinnerungen und Auffälligkeitsereignissen |
+| `max_memories_per_sender` | Mengenlimit der getrennten Wissensbasis je Signal-Absender |
+| `entity_control_enabled` | Aktiviert die bestätigungspflichtige, fest begrenzte Geräte-/Entity-Steuerung; standardmäßig `false` |
+| `controllable_entities` | Explizite Liste erlaubter Entity-IDs; bei aktiver Steuerung ist mindestens ein Eintrag erforderlich, leer erlaubt nichts |
 | `allow_sensitive_config` | Hebt den Standardschutz für Secrets/Auth-Dateien auf; nicht empfohlen |
 | `startup_message` | Sendet nach dem Start eine Statusmeldung |
 | `conversation_messages` | Lokal gespeicherter kurzer Chat-Kontext pro Absender |
@@ -132,24 +160,40 @@ Die native Registerkarte **Konfiguration** bleibt als Fallback erhalten. Werte a
 
 > Zeige meine aktiven Monitore und deaktiviere den Heizungsmonitor.
 
-Bei jeder dauerhaften Monitoränderung antwortet der Agent zunächst mit einem Code. Erst eine zweite Nachricht im Format `BESTÄTIGEN 1a2b3c4d` führt die vorgeschlagene Änderung aus. `ABBRECHEN` verwirft alle offenen Vorschläge des Absenders.
+> Merke dir: Die Kellerpumpe läuft montags beim Filterprogramm normalerweise etwa 20 Minuten.
 
-## Read-only-Sicherheitsmodell
+> Ist das heutige Verhalten von `switch.keller_pumpe` im Vergleich zum bisher Gelernten ungewöhnlich?
+
+> Was hast du dir über die Kellerpumpe gemerkt? Vergiss anschließend die veraltete Notiz zum Montagslauf.
+
+> Schalte `light.wohnzimmer` ein.
+
+> Stelle `climate.wohnzimmer` auf 21 Grad.
+
+Bei jeder dauerhaften Monitoränderung und jeder Geräteaktion antwortet der Agent zunächst mit einem Code. Erst eine zweite Nachricht im Format `BESTÄTIGEN 1a2b3c4d` führt den Vorschlag aus. `ABBRECHEN` verwirft alle offenen Vorschläge des Absenders.
+
+## Sicherheitsmodell
 
 Home Assistant bietet Add-ons derzeit keinen fein gescopten Nur-Lese-Token. Das Add-on erzwingt die Grenze deshalb in mehreren Schichten:
 
-- `/config` ist vom Supervisor read-only gemountet.
+- `/homeassistant_config` ist vom Supervisor read-only gemountet.
 - Der Home-Assistant-Adapter implementiert REST ausschließlich mit `GET`.
-- Auf der WebSocket-Verbindung sind nur lesende Zustands-/Event-Kommandos und die admin-geschützte Benutzerliste für die UI-Autorisierung zugelassen.
+- Der allgemeine WebSocket-Pfad lässt nur lesende Zustands-/Event-Kommandos und die admin-geschützte Benutzerliste für die UI-Autorisierung zu.
 - Der OpenAI-Agent sieht niemals den Supervisor-Token.
-- Es gibt kein generisches HTTP-, Shell-, Datei-Schreib- oder Service-Call-Werkzeug.
-- Schreibzugriffe betreffen ausschließlich die eigene Monitor-Datenbank in `/data`.
+- Es gibt kein generisches HTTP-, Shell-, Datei-Schreib- oder Service-Call-Werkzeug. Der einzige schreibende HA-Pfad erzeugt lokal eine feste, auf exakt eine Entity gerichtete Aktion.
+- Schreibzugriffe betreffen ausschließlich eigene Laufzeitdaten in `/data`: Monitor-/Wissensdatenbank, UI-Einstellungen und Signal-Kontodaten.
 - Die Einstellungsoberfläche akzeptiert nur Verbindungen des Home-Assistant-Ingress-Proxys und ist auf Administratoren begrenzt.
+- Die integrierte Signal-Bridge besitzt keinen veröffentlichten Netzwerk-Port; QR-Code und Kopplung laufen nur über die Admin-Oberfläche.
 - Signal-Eingang und -Ausgang sind auf `allowed_senders` begrenzt; Monitore gehören dem Ersteller.
 - Inhalte aus Logs, Konfigurationen und Events werden als nicht vertrauenswürdige Daten behandelt und vor Modellaufrufen lokal auf typische Secrets geprüft.
+- Dauerhafte Nutzererinnerungen müssen wortgleich aus der aktuellen, freigegebenen Signal-Nachricht stammen und sind nach Absender getrennt, mengenbegrenzt und mit einem Ablaufdatum versehen.
 - Dauerhafte Monitoränderungen benötigen eine vom Modell unabhängige, exakt passende Signal-Bestätigung und laufen nie aus proaktiven Agentläufen heraus.
+- Geräteaktionen sind standardmäßig deaktiviert, immer auf eine explizite Entity-ID-Freigabeliste begrenzt, müssen wortgleich aus der aktuellen Nutzernachricht hervorgehen und benötigen ebenfalls eine sendergebundene, zehn Minuten gültige Bestätigung.
+- Die Ausführung validiert Domain, Aktion, Entity, Wert und Modus erneut. Allgemeine Dienste und Konfigurations-/System-Domains sind nicht erreichbar.
 
-Der Supervisor-Token besitzt technisch mehr Rechte als der Adapter nutzt. Bei einer vollständigen Kompromittierung des Containerprozesses wäre diese programminterne Grenze nicht mit einem serverseitig gescopten Token gleichzusetzen. Das Add-on sollte daher geschützt, aktuell und nur mit einer privaten Signal-Bridge betrieben werden.
+Der Supervisor-Token besitzt technisch mehr Rechte als der Adapter nutzt. Bei einer vollständigen Kompromittierung des Containerprozesses wäre diese programminterne Grenze nicht mit einem serverseitig gescopten Token gleichzusetzen. Das Add-on sollte daher geschützt und aktuell gehalten werden. Home-Assistant-Backups enthalten außerdem die unter `/data/signal-cli` gespeicherten Signal-Geräteschlüssel und müssen entsprechend vertraulich behandelt werden.
+
+Eine erlaubte Geräteaktion kann vorhandene Home-Assistant-Automationen indirekt auslösen, weil diese auf Zustandsänderungen reagieren können. Der Agent kann solche Automationen weder bearbeiten noch direkt starten. Schlösser, Sirenen, Heizungen oder andere sicherheitsrelevante Geräte sollten deshalb nur nach bewusster Einzelprüfung in die verpflichtende Entity-Freigabeliste aufgenommen werden.
 
 Standardmäßig blockiert der Dateileser `secrets.yaml`, die komplette `.storage`-Struktur, `.cloud` und weitere sensible Bestände. Zusätzlich werden typische Schlüssel/Werte, Bearer-Tokens, OpenAI-Keys, URL-Zugangsdaten und Private-Key-Blöcke lokal geschwärzt. Diese Erkennung ist eine zusätzliche Schutzschicht, aber keine mathematische Garantie für jedes denkbare Geheimnis. Auch gewöhnliche Sensorwerte und Logs werden bei einer Analyse an die OpenAI API übertragen. Vor dem Einsatz sollten Datenschutz und Aufbewahrungsanforderungen geprüft werden.
 
@@ -160,9 +204,14 @@ Add-on-übergreifende Supervisor-Logs werden bewusst nicht angeboten: Die dafür
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r homeassistant-readonly-agent/requirements.txt
-python -m unittest discover -s tests -v
+pip install --require-hashes -r homeassistant-readonly-agent/requirements.txt
+pip install -r requirements-dev.txt
+PYTHONPATH=homeassistant-readonly-agent python -m unittest discover -s tests -v
 python -m compileall -q homeassistant-readonly-agent/app
+ruff check homeassistant-readonly-agent/app tests
+mypy homeassistant-readonly-agent/app
+bandit -q -r homeassistant-readonly-agent/app
+pip-audit -r homeassistant-readonly-agent/requirements.txt --disable-pip
 ```
 
 ## Quellen der Schnittstellen
@@ -171,6 +220,7 @@ python -m compileall -q homeassistant-readonly-agent/app
 - [Home Assistant Ingress und Präsentation](https://developers.home-assistant.io/docs/apps/presentation/)
 - [Home Assistant App-Kommunikation](https://developers.home-assistant.io/docs/apps/communication/)
 - [Home Assistant WebSocket API](https://developers.home-assistant.io/docs/api/websocket/)
+- [Home Assistant: verfügbare Actions](https://www.home-assistant.io/actions/)
 - [Home Assistant Supervisor-Endpunkte](https://developers.home-assistant.io/docs/api/supervisor/endpoints/)
 - [OpenAI Function Calling](https://developers.openai.com/api/docs/guides/function-calling)
 - [Signal CLI REST API](https://github.com/bbernhard/signal-cli-rest-api)

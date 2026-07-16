@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Home Assistant Read-only Agent</title>
+  <title>HA AI System Agent</title>
   <link rel="stylesheet" href="ui.css">
 </head>
 <body>
 <main>
   <header class="hero">
-    <img class="brand-logo" src="logo.svg" alt="Read-only Agent Logo" width="82" height="82">
+    <img class="brand-logo" src="logo.svg" alt="HA AI System Agent Logo" width="82" height="82">
     <div>
-      <h1>Read-only Agent</h1>
+      <h1>HA AI System Agent</h1>
       <p class="subtitle">Signal, OpenAI und Überwachung zentral in Home Assistant konfigurieren.</p>
     </div>
   </header>
@@ -24,7 +24,8 @@
       <h2>OpenAI</h2>
       <div class="field"><label for="openai_api_key">API-Key</label><input id="openai_api_key" type="password" autocomplete="new-password"><small id="openaiKeyHint">Wird nie an die Oberfläche zurückgegeben.</small></div>
       <div class="field"><label for="openai_model">Modell</label><input id="openai_model" value="gpt-5.6-luna"></div>
-      <div class="field"><label for="reasoning_effort">Reasoning-Stufe</label><select id="reasoning_effort"><option>none</option><option selected>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></div>
+      <div class="field"><label for="reasoning_mode">Reasoning-Steuerung</label><select id="reasoning_mode"><option value="auto" selected>Automatisch – je nach Aufgabe</option><option value="fixed">Feste Stufe</option></select><small>Automatisch verwendet lokal none bis high und benötigt keine zusätzliche API-Anfrage.</small></div>
+      <div id="fixedReasoning" class="field" hidden><label for="reasoning_effort">Feste Reasoning-Stufe</label><select id="reasoning_effort"><option>none</option><option selected>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select><small>Wird nur bei „Feste Stufe“ verwendet.</small></div>
       <div class="field"><label for="openai_timeout_seconds">API-Zeitlimit in Sekunden</label><input id="openai_timeout_seconds" type="number" min="15" max="300" value="90"></div>
       <div class="field"><label for="max_output_tokens">Maximale Ausgabe-Tokens</label><input id="max_output_tokens" type="number" min="256" max="4096" value="1800"></div>
       <div class="field"><label for="max_tool_rounds">Maximale Werkzeugrunden</label><input id="max_tool_rounds" type="number" min="2" max="12" value="8"></div>
@@ -34,16 +35,39 @@
 
     <section class="card">
       <h2>Signal</h2>
-      <div class="field"><label for="signal_api_url">Signal-API-URL</label><input id="signal_api_url" type="url" placeholder="http://192.168.1.20:8080"><small>Beim Ändern der URL wird ein alter Proxy-Token sicherheitshalber verworfen.</small></div>
-      <div class="field"><label for="signal_account">Bot-Nummer</label><input id="signal_account" placeholder="+49123456789"><small>E.164-Format mit führendem Plus.</small></div>
-      <div class="field"><label for="allowed_senders">Erlaubte Absender</label><textarea id="allowed_senders" placeholder="+49123456780&#10;+49123456781"></textarea><small>Eine Nummer pro Zeile; nicht die Bot-Nummer selbst.</small></div>
-      <div class="field"><label for="signal_api_token">Optionaler Proxy-Token</label><input id="signal_api_token" type="password" autocomplete="new-password"><small id="signalTokenHint">Nur für einen vorgeschalteten Bearer-Auth-Proxy.</small></div>
-      <label class="check"><input id="clear_signal_api_token" type="checkbox">Gespeicherten Signal-Token löschen</label>
+      <div class="field"><label for="signal_mode">Verbindungsart</label><select id="signal_mode"><option value="integrated" selected>Integriert – automatisch</option><option value="external">Externe Bridge – Expertenmodus</option></select></div>
+
+      <div id="integratedSignal" class="signal-panel">
+        <div class="signal-state"><span id="signalBridgeDot" class="dot"></span><div><strong id="signalBridgeTitle">Signal-Bridge wird geprüft …</strong><small id="signalBridgeMessage">Keine IP-Adresse oder separater Container erforderlich.</small></div></div>
+        <div class="actions compact">
+          <button id="signalConnect" type="button">Signal-Konto verbinden</button>
+          <button id="signalPair" class="secondary" type="button">Weiteren Absender koppeln</button>
+          <button id="signalUnlink" class="danger" type="button">Signal lokal trennen</button>
+        </div>
+        <div id="signalQrPanel" class="onboarding" hidden>
+          <img id="signalQr" class="signal-qr" alt="QR-Code zum Verknüpfen des Signal-Bot-Kontos" width="256" height="256">
+          <p>In der Signal-App des Bot-Kontos unter <strong>Einstellungen → Verknüpfte Geräte</strong> scannen.</p>
+        </div>
+        <div id="signalPairPanel" class="onboarding" hidden>
+          <p>Sende von deinem persönlichen Signal-Konto exakt:</p>
+          <code id="signalPairCode" class="pair-code"></code>
+          <small>Der einmalige Code ist fünf Minuten gültig. Die Absendernummer wird danach automatisch freigegeben.</small>
+        </div>
+      </div>
+
+      <div id="externalSignal" class="signal-panel" hidden>
+        <div class="field"><label for="signal_api_url">Signal-API-URL</label><input id="signal_api_url" type="url" placeholder="http://192.168.1.20:8080"><small>Beim Ändern der URL wird ein alter Proxy-Token sicherheitshalber verworfen.</small></div>
+        <div class="field"><label for="signal_api_token">Optionaler Proxy-Token</label><input id="signal_api_token" type="password" autocomplete="new-password"><small id="signalTokenHint">Nur für einen vorgeschalteten Bearer-Auth-Proxy.</small></div>
+        <label class="check"><input id="clear_signal_api_token" type="checkbox">Gespeicherten Signal-Token löschen</label>
+      </div>
+
+      <div class="field"><label for="signal_account">Bot-Nummer</label><input id="signal_account" placeholder="Wird nach dem QR-Scan automatisch erkannt"><small id="signalAccountHint">Im integrierten Modus automatisch erkannt.</small></div>
+      <div class="field"><label for="allowed_senders">Erlaubte Absender</label><textarea id="allowed_senders" placeholder="Wird durch den Kopplungscode automatisch ergänzt"></textarea><small>Gekoppelte Nummern dürfen mit dem Agenten chatten. Zusätzliche Nummern können weiterhin manuell ergänzt werden.</small></div>
     </section>
 
     <section class="card">
       <h2>Laufzeit und Speicher</h2>
-      <div class="field"><label for="timezone">Zeitzone</label><input id="timezone" value="Europe/Berlin"></div>
+      <div class="field"><label for="timezone">Zeitzone</label><select id="timezone"><option value="Europe/Berlin" selected>Europe/Berlin</option></select><small>Gültige IANA-Zeitzone für Cron-Jobs und zeitabhängige Überwachungen.</small></div>
       <div class="field"><label for="conversation_messages">Chat-Nachrichten im Kontext</label><input id="conversation_messages" type="number" min="2" max="30" value="12"></div>
       <div class="field"><label for="message_retention_days">Chat-Aufbewahrung in Tagen</label><input id="message_retention_days" type="number" min="1" max="365" value="30"></div>
       <div class="field"><label for="max_messages_per_sender">Maximale Nachrichten pro Absender</label><input id="max_messages_per_sender" type="number" min="20" max="5000" value="500"></div>
@@ -55,8 +79,26 @@
     </section>
 
     <section class="card">
+      <h2>Lernen und Wissensbasis</h2>
+      <label class="check"><input id="learning_enabled" type="checkbox" checked><span>Lokales Lernen und Erinnerungen aktivieren</span></label>
+      <small>Zustandsereignisse werden lokal zu kompakten Baselines zusammengefasst. OpenAI wird erst bei einer belastbaren Auffälligkeit oder einer passenden Anfrage verwendet.</small>
+      <div class="field"><label for="anomaly_sensitivity">Empfindlichkeit</label><select id="anomaly_sensitivity"><option value="conservative">Konservativ – weniger Meldungen</option><option value="balanced" selected>Ausgewogen</option><option value="sensitive">Empfindlich – frühere Meldungen</option></select></div>
+      <div class="field"><label for="memory_retention_days">Maximale Aufbewahrung in Tagen</label><input id="memory_retention_days" type="number" min="1" max="3650" value="365"><small>Der Agent kann für einzelne Erinnerungen eine kürzere Lebensdauer wählen.</small></div>
+      <div class="field"><label for="max_memories_per_sender">Maximale Erinnerungen pro Absender</label><input id="max_memories_per_sender" type="number" min="10" max="1000" value="200"></div>
+      <div class="notice"><strong>Kontrolliertes Gedächtnis</strong><p>Nur exakte Aussagen aus deiner aktuellen Signal-Nachricht dürfen als Nutzererinnerung gespeichert werden. Logs, Configs und Events können keine Erinnerungsanweisungen einschleusen.</p></div>
+    </section>
+
+    <section class="card">
+      <h2>Geräte- und Entity-Steuerung</h2>
+      <label class="check"><input id="entity_control_enabled" type="checkbox"><span>Bestätigte Gerätesteuerung aktivieren</span></label>
+      <small>Standardmäßig ausgeschaltet. Der Agent darf nur eine fest definierte Auswahl physischer Entity-Aktionen vorschlagen; jede Ausführung benötigt anschließend einen separaten <code>BESTÄTIGEN …</code>-Befehl über Signal.</small>
+      <div class="field"><label for="controllable_entities">Explizit erlaubte Entity-IDs</label><textarea id="controllable_entities" placeholder="light.wohnzimmer&#10;climate.heizung&#10;cover.rollladen"></textarea><small>Eine Entity-ID pro Zeile. Bei aktiver Steuerung ist mindestens ein Eintrag erforderlich; ein leeres Feld erlaubt keine Geräteaktion.</small></div>
+      <div class="notice"><strong>Keine allgemeine Service-Freigabe</strong><p>Automationen, Skripte, Szenen, Buttons, Helfer, Alarmanlagen, Updates, System-/Add-on-Dienste und Dateiänderungen bleiben gesperrt. Sichere Geräte wie Schlösser oder Sirenen sollten zusätzlich über die Entity-Liste eingeschränkt werden.</p></div>
+    </section>
+
+    <section class="card">
       <h2>Sicherheit und Datenschutz</h2>
-      <div class="notice"><strong>Home Assistant bleibt read-only.</strong><p>Monitoränderungen werden erst nach einem separaten <code>BESTÄTIGEN …</code> im Signal-Chat aktiv.</p></div>
+      <div class="notice"><strong>Konfiguration und System bleiben read-only.</strong><p>Monitoränderungen und freigegebene Geräteaktionen werden erst nach einem separaten <code>BESTÄTIGEN …</code> im Signal-Chat aktiv.</p></div>
       <p><label class="check"><input id="allow_sensitive_config" type="checkbox"><span>Sensible Dateien wie <code>secrets.yaml</code> und <code>.storage</code> lesbar machen</span></label></p>
       <small>Nicht empfohlen. Auch bei Freigabe werden erkannte Kennwörter, Tokens und Schlüssel lokal geschwärzt, bevor Daten an OpenAI gehen.</small>
       <p class="admin-note">Diese Oberfläche prüft serverseitig, ob der angemeldete Home-Assistant-Benutzer Administrator ist.</p>

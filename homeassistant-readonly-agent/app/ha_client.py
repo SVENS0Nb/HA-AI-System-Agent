@@ -10,15 +10,17 @@ from urllib.parse import quote
 
 import aiohttp
 
+from .entity_control import resolve_entity_control, validate_controllable_entity_id
+
 LOGGER = logging.getLogger(__name__)
 
 
 class ReadOnlyViolation(RuntimeError):
-    """Raised when code attempts an operation outside the read-only capability set."""
+    """Raised when code attempts an operation outside the explicit capability set."""
 
 
 class HomeAssistantReadClient:
-    """Narrow Home Assistant/Supervisor client with no generic write primitive."""
+    """Narrow HA client with reads and one validated entity-control primitive."""
 
     CORE_API = "http://supervisor/core/api"
     CORE_WS = "ws://supervisor/core/websocket"
@@ -31,6 +33,7 @@ class HomeAssistantReadClient:
     }
     MAX_JSON_BYTES = 10 * 1024 * 1024
     MAX_LOG_BYTES = 2 * 1024 * 1024
+    WS_COMMAND_TIMEOUT = 30
 
     def __init__(self, token: str, session: aiohttp.ClientSession) -> None:
         self._token = token
@@ -127,19 +130,72 @@ class HomeAssistantReadClient:
             )
         )
 
-    async def _one_shot_ws_command(self, command: str) -> Any:
+    async def control_entity(
+        self,
+        entity_id: str,
+        action: str,
+        value: float | int | None,
+        mode: str | None,
+    ) -> dict[str, Any]:
+        """Execute only a command produced by the closed entity-control map."""
+        entity_id = validate_controllable_entity_id(entity_id)
+        state = await self.state(entity_id)
+        if str(state.get("entity_id", "")) != entity_id:
+            raise ReadOnlyViolation("Home Assistant returned a different entity target")
+        command = resolve_entity_control(state, action, value, mode)
+        payload = {"id": 1, "type": "call_service", **command}
         async with self._session.ws_connect(
-            self.CORE_WS, heartbeat=30, max_msg_size=self.MAX_JSON_BYTES
+            self.CORE_WS,
+            heartbeat=30,
+            max_msg_size=self.MAX_JSON_BYTES,
+            timeout=aiohttp.ClientWSTimeout(
+                ws_receive=self.WS_COMMAND_TIMEOUT, ws_close=10
+            ),
         ) as websocket:
-            greeting = await websocket.receive_json()
+            greeting = await self._receive_json(websocket)
             if greeting.get("type") != "auth_required":
                 raise RuntimeError("Unexpected Home Assistant WebSocket greeting")
             await websocket.send_json({"type": "auth", "access_token": self._token})
-            auth_result = await websocket.receive_json()
+            auth_result = await self._receive_json(websocket)
+            if auth_result.get("type") != "auth_ok":
+                raise PermissionError("Home Assistant WebSocket authentication failed")
+            # Deliberately do not route this through _send_ws_command: generic
+            # call_service remains blocked there. Only the locally resolved,
+            # entity-targeted command above reaches this single send site.
+            await websocket.send_json(payload)
+            response = await self._receive_json(websocket)
+            if response.get("type") != "result" or response.get("success") is not True:
+                raise PermissionError(
+                    "Home Assistant rejected the entity action: "
+                    f"{response.get('error', {})}"
+                )
+        return {
+            "accepted": True,
+            "entity_id": command["target"]["entity_id"],
+            "action": action,
+            "domain": command["domain"],
+            "service": command["service"],
+            "service_data": command["service_data"],
+        }
+
+    async def _one_shot_ws_command(self, command: str) -> Any:
+        async with self._session.ws_connect(
+            self.CORE_WS,
+            heartbeat=30,
+            max_msg_size=self.MAX_JSON_BYTES,
+            timeout=aiohttp.ClientWSTimeout(
+                ws_receive=self.WS_COMMAND_TIMEOUT, ws_close=10
+            ),
+        ) as websocket:
+            greeting = await self._receive_json(websocket)
+            if greeting.get("type") != "auth_required":
+                raise RuntimeError("Unexpected Home Assistant WebSocket greeting")
+            await websocket.send_json({"type": "auth", "access_token": self._token})
+            auth_result = await self._receive_json(websocket)
             if auth_result.get("type") != "auth_ok":
                 raise PermissionError("Home Assistant WebSocket authentication failed")
             await self._send_ws_command(websocket, {"id": 1, "type": command})
-            response = await websocket.receive_json()
+            response = await self._receive_json(websocket)
             if response.get("type") != "result" or response.get("success") is not True:
                 raise PermissionError(
                     f"Home Assistant rejected {command}: {response.get('error', {})}"
@@ -152,9 +208,12 @@ class HomeAssistantReadClient:
         while True:
             try:
                 async with self._session.ws_connect(
-                    self.CORE_WS, heartbeat=30, max_msg_size=self.MAX_JSON_BYTES
+                    self.CORE_WS,
+                    heartbeat=30,
+                    max_msg_size=self.MAX_JSON_BYTES,
+                    timeout=aiohttp.ClientWSTimeout(ws_receive=None, ws_close=10),
                 ) as websocket:
-                    auth_required = await websocket.receive_json()
+                    auth_required = await self._receive_json(websocket)
                     if auth_required.get("type") != "auth_required":
                         raise RuntimeError(
                             f"Unexpected WebSocket greeting: {auth_required}"
@@ -162,7 +221,7 @@ class HomeAssistantReadClient:
                     await websocket.send_json(
                         {"type": "auth", "access_token": self._token}
                     )
-                    auth_result = await websocket.receive_json()
+                    auth_result = await self._receive_json(websocket)
                     if auth_result.get("type") != "auth_ok":
                         raise RuntimeError(
                             f"Home Assistant WebSocket authentication failed: {auth_result}"
@@ -170,6 +229,16 @@ class HomeAssistantReadClient:
                     await self._send_ws_command(
                         websocket, {"id": 1, "type": "subscribe_events"}
                     )
+                    subscription = await self._receive_json(websocket)
+                    if (
+                        subscription.get("id") != 1
+                        or subscription.get("type") != "result"
+                        or subscription.get("success") is not True
+                    ):
+                        raise PermissionError(
+                            "Home Assistant rejected event subscription: "
+                            f"{subscription.get('error', {})}"
+                        )
                     delay = 1
                     async for message in websocket:
                         if message.type == aiohttp.WSMsgType.TEXT:
@@ -200,3 +269,12 @@ class HomeAssistantReadClient:
         if payload.get("type") not in self._ALLOWED_WS_COMMANDS:
             raise ReadOnlyViolation(f"Blocked WebSocket command: {payload.get('type')}")
         await websocket.send_json(payload)
+
+    async def _receive_json(
+        self, websocket: aiohttp.ClientWebSocketResponse
+    ) -> dict[str, Any]:
+        async with asyncio.timeout(self.WS_COMMAND_TIMEOUT):
+            payload = await websocket.receive_json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Unexpected non-object Home Assistant WebSocket message")
+        return payload

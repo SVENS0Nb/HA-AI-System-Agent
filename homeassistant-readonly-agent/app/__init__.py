@@ -1,1 +1,1 @@
-"""Home Assistant read-only Signal agent."""
+"""HA AI System Agent with read-only diagnostics and confirmed entity control."""

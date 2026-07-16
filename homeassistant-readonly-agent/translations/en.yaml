@@ -4,20 +4,42 @@ configuration:
     description: Can alternatively be stored in the add-on web interface.
   openai_model:
     name: OpenAI model
+  reasoning_mode:
+    name: Reasoning control
+    description: Auto selects locally from none through high based on the task; fixed uses the configured effort.
   reasoning_effort:
-    name: Reasoning effort
+    name: Fixed reasoning effort
+  signal_mode:
+    name: Signal connection mode
+    description: Integrated starts the bridge automatically; external uses your own API.
   signal_api_url:
     name: Signal API URL
-    description: Internal HTTP(S) address of signal-cli-rest-api.
+    description: Expert mode only; HTTP(S) address of the external signal-cli-rest-api.
   signal_api_token:
     name: Signal proxy token
     description: Optional bearer token for an authentication proxy.
   signal_account:
     name: Signal bot number
+    description: Detected automatically after QR linking in integrated mode.
   allowed_senders:
     name: Allowed Signal senders
   timezone:
     name: Timezone
+  learning_enabled:
+    name: Enable local learning
+    description: Builds local device baselines and a controlled knowledge base.
+  anomaly_sensitivity:
+    name: Behavior analysis sensitivity
+  memory_retention_days:
+    name: Maximum memory retention in days
+  max_memories_per_sender:
+    name: Maximum memories per sender
+  entity_control_enabled:
+    name: Enable confirmed device control
+    description: Allows only fixed actions on supported entity domains; every action requires Signal confirmation.
+  controllable_entities:
+    name: Controllable entity IDs
+    description: Explicit allowlist; at least one entity ID is required while control is enabled.
   allow_sensitive_config:
     name: Allow sensitive configuration
     description: Not recommended; permits reading secrets and authentication files.

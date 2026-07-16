@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
+import aiohttp
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 
@@ -14,6 +15,7 @@ from .storage import Storage
 
 LOGGER = logging.getLogger(__name__)
 RunCallback = Callable[[dict[str, Any], dict[str, Any]], Awaitable[None]]
+StateObserver = Callable[[dict[str, Any]], Awaitable[None]]
 QueueItem = tuple[dict[str, Any], dict[str, Any], str, int]
 
 
@@ -31,15 +33,21 @@ class MonitorService:
         self.scheduler = AsyncIOScheduler(timezone=timezone_name)
         self.reconcile_interval_seconds = reconcile_interval_seconds
         self._run_callback: RunCallback | None = None
+        self._state_observer: StateObserver | None = None
         self._pending: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._trigger_queue: asyncio.Queue[QueueItem] = asyncio.Queue(maxsize=200)
         self._workers: list[asyncio.Task[None]] = []
         self._reconciler: asyncio.Task[None] | None = None
         self._inflight: set[tuple[str, str]] = set()
+        self._enabled_monitors: list[dict[str, Any]] = []
+        self._monitor_cache_initialized = False
         self._running = False
 
     def set_run_callback(self, callback: RunCallback) -> None:
         self._run_callback = callback
+
+    def set_state_observer(self, observer: StateObserver) -> None:
+        self._state_observer = observer
 
     async def start(self) -> None:
         self._running = True
@@ -72,7 +80,9 @@ class MonitorService:
 
     def refresh_cron_jobs(self) -> None:
         self.scheduler.remove_all_jobs()
-        for monitor in self.storage.list_monitors(enabled_only=True):
+        self._enabled_monitors = self.storage.list_monitors(enabled_only=True)
+        self._monitor_cache_initialized = True
+        for monitor in self._enabled_monitors:
             if monitor["kind"] != "cron":
                 continue
             try:
@@ -107,6 +117,19 @@ class MonitorService:
         for entity_id in monitor["spec"]["entity_ids"]:
             try:
                 current = await self.ha.state(entity_id)
+            except aiohttp.ClientResponseError as exc:
+                if exc.status == 404:
+                    self._consider_entity_state(
+                        monitor, entity_id, "unavailable", entity_missing=True
+                    )
+                    continue
+                LOGGER.warning(
+                    "Cannot evaluate %s for monitor %s: %s",
+                    entity_id,
+                    monitor["id"],
+                    exc,
+                )
+                continue
             except Exception as exc:
                 LOGGER.warning(
                     "Cannot evaluate %s for monitor %s: %s",
@@ -120,11 +143,7 @@ class MonitorService:
             )
 
     async def _reconcile_entity_monitors(self) -> None:
-        monitors = [
-            item
-            for item in self.storage.list_monitors(enabled_only=True)
-            if item["kind"] == "entity"
-        ]
+        monitors = [item for item in self._enabled_monitors if item["kind"] == "entity"]
         if not monitors:
             return
         try:
@@ -139,6 +158,10 @@ class MonitorService:
             for entity_id in monitor["spec"]["entity_ids"]:
                 if entity_id in states:
                     self._consider_entity_state(monitor, entity_id, states[entity_id])
+                else:
+                    self._consider_entity_state(
+                        monitor, entity_id, "unavailable", entity_missing=True
+                    )
 
     async def _reconcile_loop(self) -> None:
         while True:
@@ -146,7 +169,12 @@ class MonitorService:
             await self._reconcile_entity_monitors()
 
     def _consider_entity_state(
-        self, monitor: dict[str, Any], entity_id: str, state: str
+        self,
+        monitor: dict[str, Any],
+        entity_id: str,
+        state: str,
+        *,
+        entity_missing: bool = False,
     ) -> None:
         key = (monitor["id"], entity_id)
         bad_states = {str(item) for item in monitor["spec"]["problem_states"]}
@@ -157,7 +185,9 @@ class MonitorService:
             return
         if key not in self._pending or self._pending[key].done():
             self._pending[key] = asyncio.create_task(
-                self._confirm_entity_problem(monitor["id"], entity_id, state),
+                self._confirm_entity_problem(
+                    monitor["id"], entity_id, state, entity_missing
+                ),
                 name=f"entity-monitor-{monitor['id']}-{entity_id}",
             )
 
@@ -177,6 +207,11 @@ class MonitorService:
             event_type = str(event.get("event_type", ""))
             if event_type == "state_changed":
                 self._handle_state_change(event)
+                if self._state_observer is not None:
+                    try:
+                        await self._state_observer(event)
+                    except Exception:
+                        LOGGER.exception("State observer rejected an event")
             self._handle_generic_event(event)
 
     def _handle_state_change(self, event: dict[str, Any]) -> None:
@@ -184,15 +219,24 @@ class MonitorService:
         entity_id = str(data.get("entity_id", ""))
         new_state_obj = data.get("new_state") or {}
         new_state = str(new_state_obj.get("state", ""))
-        for monitor in self.storage.list_monitors(enabled_only=True):
+        for monitor in self._current_enabled_monitors():
             if (
                 monitor["kind"] == "entity"
                 and entity_id in monitor["spec"]["entity_ids"]
             ):
-                self._consider_entity_state(monitor, entity_id, new_state)
+                self._consider_entity_state(
+                    monitor,
+                    entity_id,
+                    new_state if isinstance(data.get("new_state"), dict) else "unavailable",
+                    entity_missing=not isinstance(data.get("new_state"), dict),
+                )
 
     async def _confirm_entity_problem(
-        self, monitor_id: str, entity_id: str, observed_state: str
+        self,
+        monitor_id: str,
+        entity_id: str,
+        observed_state: str,
+        entity_missing_observed: bool = False,
     ) -> None:
         key = (monitor_id, entity_id)
         try:
@@ -201,13 +245,24 @@ class MonitorService:
             monitor = self.storage.get_monitor(monitor_id)
             if not monitor["enabled"]:
                 return
-            current = await self.ha.state(entity_id)
+            try:
+                current = await self.ha.state(entity_id)
+            except aiohttp.ClientResponseError as exc:
+                if exc.status != 404:
+                    raise
+                current = {
+                    "entity_id": entity_id,
+                    "state": "unavailable",
+                    "attributes": {},
+                    "missing": True,
+                }
             if current.get("state") not in monitor["spec"]["problem_states"]:
                 return
             context = {
                 "trigger": "entity_state",
                 "entity_id": entity_id,
                 "observed_state": observed_state,
+                "entity_missing_when_observed": entity_missing_observed,
                 "current_state": current,
             }
             if self._running:
@@ -222,7 +277,7 @@ class MonitorService:
             self._pending.pop(key, None)
 
     def _handle_generic_event(self, event: dict[str, Any]) -> None:
-        for monitor in self.storage.list_monitors(enabled_only=True):
+        for monitor in self._current_enabled_monitors():
             if monitor["kind"] != "event" or monitor["spec"]["event_type"] != event.get(
                 "event_type"
             ):
@@ -235,6 +290,11 @@ class MonitorService:
                     {"trigger": "home_assistant_event", "event": event},
                     "default",
                 )
+
+    def _current_enabled_monitors(self) -> list[dict[str, Any]]:
+        if self._monitor_cache_initialized:
+            return self._enabled_monitors
+        return self.storage.list_monitors(enabled_only=True)
 
     def _enqueue(
         self, monitor: dict[str, Any], context: dict[str, Any], run_key: str
@@ -249,6 +309,12 @@ class MonitorService:
             monitor, context, run_key, attempt = await self._trigger_queue.get()
             try:
                 await self._trigger(monitor, context, run_key, attempt)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception(
+                    "Monitor worker recovered after failure for %s", monitor.get("id")
+                )
             finally:
                 self._trigger_queue.task_done()
 
