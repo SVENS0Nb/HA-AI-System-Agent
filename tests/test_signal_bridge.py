@@ -162,6 +162,7 @@ class LocalSignalBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("SUPERVISOR_TOKEN", environment)
         self.assertEqual(environment["PATH"], "/usr/bin:/bin")
         self.assertEqual(environment["SIGNAL_CLI_CONFIG_DIR"], str(bridge.config_dir))
+        self.assertEqual(environment["MODE"], "json-rpc-native")
 
     async def test_bridge_failure_output_is_redacted_before_display(self) -> None:
         reader = asyncio.StreamReader()
@@ -171,6 +172,18 @@ class LocalSignalBridgeTests(unittest.IsolatedAsyncioTestCase):
         message = self.bridge._failure_message(1)  # noqa: SLF001
         self.assertIn("api_key=[REDACTED]", message)
         self.assertNotIn("super-secret-value", message)
+
+    async def test_startup_timeout_retains_a_useful_diagnostic(self) -> None:
+        self.bridge._output_lines.extend(  # noqa: SLF001
+            [
+                "spawned: signal-cli-json-rpc-1",
+                "Missing required native library dependency: 'libsignal-client'",
+                "spawned: signal-cli-json-rpc-1",
+            ]
+        )
+        message = self.bridge._startup_timeout_message()  # noqa: SLF001
+        self.assertIn("nicht rechtzeitig bereit", message)
+        self.assertIn("Missing required native library", message)
 
     async def test_live_startup_is_not_restarted_by_concurrent_request(self) -> None:
         entrypoint = Path(self.temp.name) / "entrypoint-restart"

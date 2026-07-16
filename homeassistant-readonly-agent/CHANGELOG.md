@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.3
+
+- Speicherschonender nativer Signal-JSON-RPC-Daemon ohne dauerhaft laufende Java-VM
+- Behebung des Signal-Starts auf Home Assistant mit nicht ausführbarem `/tmp`-Dateisystem
+- Container-Test bildet Home Assistants `noexec`-Schutz für `/tmp` nach und verhindert Rückfälle
+- Die Oberfläche zeigt nach einem Start-Timeout die relevante geschwärzte Bridge-Diagnose an
+
 ## 0.7.2
 
 - Signal-API und `signal-cli` laufen gemeinsam unter einem einzigen Vordergrund-Supervisor, sodass Neustarts keine verwaisten Prozesse zurücklassen

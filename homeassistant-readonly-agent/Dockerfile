@@ -35,7 +35,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONHASHSEED=random \
     SIGNAL_BRIDGE_ENTRYPOINT=/usr/local/bin/signal-bridge-entrypoint \
     SIGNAL_CLI_CONFIG_DIR=/data/signal-cli \
-    MODE=json-rpc \
+    MODE=json-rpc-native \
     PORT=8080
 
 USER root

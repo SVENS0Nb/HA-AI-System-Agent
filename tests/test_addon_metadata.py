@@ -33,7 +33,7 @@ class AddonMetadataTests(unittest.TestCase):
         self.assertNotIn("full_access", config)
         self.assertNotIn("privileged", config)
         self.assertNotIn("ports", config)
-        self.assertEqual(config["version"], "0.7.2")
+        self.assertEqual(config["version"], "0.7.3")
         self.assertEqual(config["name"], "HA AI System Agent")
         self.assertEqual(config["panel_title"], "HA AI System Agent")
         self.assertEqual(config["options"]["signal_mode"], "integrated")
@@ -87,6 +87,7 @@ class AddonMetadataTests(unittest.TestCase):
         self.assertIn("ARG BUILD_ARCH", dockerfile)
         self.assertIn('ENTRYPOINT ["/run.sh"]', dockerfile)
         self.assertIn("SIGNAL_CLI_CONFIG_DIR=/data/signal-cli", dockerfile)
+        self.assertIn("MODE=json-rpc-native", dockerfile)
         self.assertIn("signal-bridge-entrypoint.sh", dockerfile)
         self.assertIn("signal-supervisord.conf", dockerfile)
         entrypoint = (addon / "signal-bridge-entrypoint.sh").read_text(

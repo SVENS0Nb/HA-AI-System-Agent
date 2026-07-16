@@ -80,6 +80,7 @@ class LocalSignalBridge:
         self._process: asyncio.subprocess.Process | None = None
         self._output_task: asyncio.Task[None] | None = None
         self._output_lines: deque[str] = deque(maxlen=20)
+        self._startup_error: str | None = None
         self._process_lock = asyncio.Lock()
         self._pairing_task: asyncio.Task[None] | None = None
         self._pairing_state = PairingState()
@@ -126,7 +127,10 @@ class LocalSignalBridge:
         }
         environment.update(
             {
-                "MODE": "json-rpc",
+                # The native daemon keeps the fast JSON-RPC connection without
+                # a resident JVM. It also avoids extracting libsignal_jni.so
+                # into Home Assistant's intentionally noexec /tmp mount.
+                "MODE": "json-rpc-native",
                 "PORT": str(urlsplit(self.base_url).port or 8080),
                 "SIGNAL_CLI_CONFIG_DIR": str(self.config_dir),
                 "SIGNAL_CLI_UID": "1000",
@@ -135,6 +139,7 @@ class LocalSignalBridge:
             }
         )
         self._output_lines.clear()
+        self._startup_error = None
         process = await asyncio.create_subprocess_exec(
             str(self.entrypoint),
             env=environment,
@@ -157,9 +162,11 @@ class LocalSignalBridge:
             process = self._process
             if process is not None and process.returncode is not None:
                 await self._finish_output_task(self._output_task)
-                raise RuntimeError(self._failure_message(process.returncode))
+                self._startup_error = self._failure_message(process.returncode)
+                raise RuntimeError(self._startup_error)
             if asyncio.get_running_loop().time() >= deadline:
-                raise TimeoutError("Die Signal-Bridge wurde nicht rechtzeitig bereit.")
+                self._startup_error = self._startup_timeout_message()
+                raise TimeoutError(self._startup_error)
             await asyncio.sleep(1)
 
     async def health(self) -> bool:
@@ -167,7 +174,10 @@ class LocalSignalBridge:
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(f"{self.base_url}/v1/health") as response:
-                    return response.status == 204
+                    ready = response.status == 204
+                    if ready:
+                        self._startup_error = None
+                    return ready
         except (aiohttp.ClientError, TimeoutError):
             return False
 
@@ -190,7 +200,7 @@ class LocalSignalBridge:
     async def status(self) -> dict[str, Any]:
         ready = await self.health()
         accounts: list[str] = []
-        error: str | None = None
+        error: str | None = self._startup_error if not ready else None
         if ready:
             try:
                 accounts = await self.accounts()
@@ -331,6 +341,27 @@ class LocalSignalBridge:
         message = f"Die Signal-Bridge wurde mit Status {returncode} beendet."
         if self._output_lines:
             message += f" Letzte Ausgabe: {self._output_lines[-1]}"
+        return message
+
+    def _startup_timeout_message(self) -> str:
+        message = "Die Signal-Bridge wurde nicht rechtzeitig bereit."
+        diagnostic_markers = (
+            " error ",
+            " fatal ",
+            " failed ",
+            "missing required",
+            "not expected",
+        )
+        diagnostic = next(
+            (
+                line
+                for line in reversed(self._output_lines)
+                if any(marker in f" {line.casefold()} " for marker in diagnostic_markers)
+            ),
+            None,
+        )
+        if diagnostic:
+            message += f" Diagnose: {diagnostic}"
         return message
 
     @staticmethod
