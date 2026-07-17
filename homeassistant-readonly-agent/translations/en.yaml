@@ -37,6 +37,43 @@ configuration:
     name: Maximum memory retention in days
   max_memories_per_sender:
     name: Maximum memories per sender
+  intelligent_monitoring_enabled:
+    name: Enable intelligent monitoring
+    description: Locally turns Home Assistant events into profiles, baselines, anomalies, and grouped incidents.
+  monitoring_event_retention_days:
+    name: Event retention in days
+  monitoring_minimum_baseline_samples:
+    name: Minimum baseline samples
+  monitoring_unavailable_grace_period_seconds:
+    name: Unavailable-device grace period
+  monitoring_incident_grouping_window_seconds:
+    name: Incident grouping window
+  monitoring_notification_minimum_priority:
+    name: Minimum notification priority percent
+  monitoring_update_timeout_multiplier:
+    name: Missing-update interval multiplier
+  monitoring_llm_analysis_enabled:
+    name: Enable structured AI incident analysis
+  monitoring_notifications_enabled:
+    name: Send proactive incident notifications
+  monitoring_notify_on_resolve:
+    name: Send incident resolution notifications
+  monitoring_daily_summaries_enabled:
+    name: Generate hourly, daily and weekly summaries
+  monitoring_log_analysis_enabled:
+    name: Cluster and monitor logs locally
+  monitoring_maintenance_mode:
+    name: Enable maintenance mode
+  monitoring_vacation_mode:
+    name: Enable vacation mode
+  monitoring_quiet_hours_start:
+    name: Quiet hours start (HH:MM)
+  monitoring_quiet_hours_end:
+    name: Quiet hours end (HH:MM)
+  monitoring_notification_cooldown_seconds:
+    name: Notification repeat interval in seconds
+  monitoring_context_max_chars:
+    name: Maximum AI context size in characters
   entity_control_enabled:
     name: Enable confirmed device control
     description: Allows only fixed actions on supported entity domains; every action requires Signal confirmation.

@@ -51,6 +51,19 @@ class FakeRegistry:
     ) -> Any:
         del sender, trusted_user_message
         self.calls.append((name, arguments, allow_monitor_changes))
+        if name == "control_entity":
+            return {
+                "requires_confirmation": True,
+                "confirmation_token": "a1b2c3d4",
+                "entity_id": "light.kitchen",
+                "_confirmation_notice": (
+                    "Geräteaktion zur Bestätigung:\n"
+                    "Entity: light.kitchen\n"
+                    "Dienst: light.turn_on\n"
+                    "Parameter: {}\n"
+                    "Zur Ausführung exakt senden: BESTÄTIGEN a1b2c3d4"
+                ),
+            }
         return {"entity_id": "sensor.test", "state": "online"}
 
 
@@ -115,6 +128,22 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.responses.requests), 2)
         self.assertEqual(self.responses.requests[0]["reasoning"]["effort"], "low")
         self.assertEqual(self.responses.requests[1]["reasoning"]["effort"], "medium")
+
+    async def test_control_confirmation_is_appended_outside_model_output(self) -> None:
+        self.responses = FakeResponses(tool_name="control_entity")
+        self.agent.client = SimpleNamespace(responses=self.responses)  # type: ignore[assignment]
+        answer = await self.agent.chat("+49111", "Schalte das Küchenlicht ein")
+        self.assertIn("Entity: light.kitchen", answer)
+        self.assertIn("Dienst: light.turn_on", answer)
+        self.assertIn("BESTÄTIGEN a1b2c3d4", answer)
+        tool_output = next(
+            item
+            for item in self.responses.requests[1]["input"]
+            if isinstance(item, dict) and item.get("type") == "function_call_output"
+        )
+        self.assertNotIn("_confirmation_notice", tool_output["output"])
+        self.assertNotIn("a1b2c3d4", tool_output["output"])
+        self.assertIn("confirmation_ready", tool_output["output"])
 
     async def test_fixed_reasoning_mode_preserves_manual_effort(self) -> None:
         self.agent.reasoning_mode = "fixed"

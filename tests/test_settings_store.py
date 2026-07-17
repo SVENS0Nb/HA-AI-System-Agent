@@ -63,6 +63,37 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertTrue(public["openai_api_key_set"])
         self.assertTrue(public["signal_api_token_set"])
         self.assertNotIn("native-secret", json.dumps(public))
+        self.assertTrue(public["intelligent_monitoring_enabled"])
+        self.assertEqual(public["monitoring_minimum_baseline_samples"], 20)
+
+    def test_intelligent_monitoring_defaults_are_safe_and_bounded(self) -> None:
+        settings = self.store.settings()
+        self.assertTrue(settings.intelligent_monitoring_enabled)
+        self.assertEqual(settings.monitoring_unavailable_grace_period_seconds, 900)
+        self.assertTrue(settings.monitoring_llm_analysis_enabled)
+        self.assertTrue(settings.monitoring_notifications_enabled)
+        self.assertTrue(settings.monitoring_notify_on_resolve)
+        self.assertFalse(settings.monitoring_vacation_mode)
+        self.assertEqual(settings.monitoring_quiet_hours_start, "23:00")
+        self.assertEqual(settings.monitoring_quiet_hours_end, "07:00")
+        bounded = self.store.update(
+            {
+                "monitoring_event_retention_days": 999,
+                "monitoring_minimum_baseline_samples": 1,
+                "monitoring_notification_minimum_priority": -10,
+                "monitoring_notification_cooldown_seconds": 1,
+                "monitoring_context_max_chars": 999_999,
+            }
+        )
+        self.assertEqual(bounded.monitoring_event_retention_days, 90)
+        self.assertEqual(bounded.monitoring_minimum_baseline_samples, 5)
+        self.assertEqual(bounded.monitoring_notification_minimum_priority, 0)
+        self.assertEqual(bounded.monitoring_notification_cooldown_seconds, 300)
+        self.assertEqual(bounded.monitoring_context_max_chars, 100_000)
+
+    def test_monitoring_quiet_hours_require_exact_clock_format(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "HH:MM"):
+            self.store.update({"monitoring_quiet_hours_start": "25:00"})
 
     def test_ui_values_override_native_options_and_file_is_private(self) -> None:
         settings = self.store.update(

@@ -99,6 +99,43 @@
     </section>
 
     <section class="card">
+      <h2>Intelligente Überwachung</h2>
+      <label class="check"><input id="intelligent_monitoring_enabled" type="checkbox" checked><span>Lokale Anomalie- und Incident-Erkennung aktivieren</span></label>
+      <small>Home-Assistant-Ereignisse werden lokal normalisiert, kontextbezogen ausgewertet und zu erklärbaren Incidents gruppiert. Der LLM entscheidet nicht, ob eine Anomalie vorliegt.</small>
+      <div class="field"><label for="monitoring_event_retention_days">Ereignisaufbewahrung in Tagen</label><input id="monitoring_event_retention_days" type="number" min="1" max="90" value="7"></div>
+      <div class="field"><label for="monitoring_minimum_baseline_samples">Minimale Baseline-Stichproben</label><input id="monitoring_minimum_baseline_samples" type="number" min="5" max="500" value="20"><small>Vorher arbeitet das System konservativ und meldet keine statistischen Abweichungen.</small></div>
+      <div class="field"><label for="monitoring_unavailable_grace_period_seconds">Karenzzeit bei „unavailable“ in Sekunden</label><input id="monitoring_unavailable_grace_period_seconds" type="number" min="0" max="86400" value="900"></div>
+      <div class="field"><label for="monitoring_incident_grouping_window_seconds">Incident-Gruppierungsfenster in Sekunden</label><input id="monitoring_incident_grouping_window_seconds" type="number" min="10" max="3600" value="120"></div>
+      <div class="field"><label for="monitoring_notification_minimum_priority">Minimale Benachrichtigungspriorität in Prozent</label><input id="monitoring_notification_minimum_priority" type="number" min="0" max="100" value="50"><small>Incidents unterhalb dieser Grenze bleiben in UI und Datenbank sichtbar, lösen aber keine proaktive Meldung aus.</small></div>
+      <div class="field"><label for="monitoring_update_timeout_multiplier">Faktor für ausbleibende Aktualisierungen</label><input id="monitoring_update_timeout_multiplier" type="number" min="2" max="20" value="3"></div>
+      <label class="check"><input id="monitoring_llm_analysis_enabled" type="checkbox" checked><span>Strukturierte OpenAI-Incident-Analyse aktivieren</span></label>
+      <label class="check"><input id="monitoring_notifications_enabled" type="checkbox" checked><span>Proaktive Incident-Meldungen über Signal senden</span></label>
+      <label class="check"><input id="monitoring_notify_on_resolve" type="checkbox" checked><span>Entwarnungen über Signal senden</span></label>
+      <label class="check"><input id="monitoring_daily_summaries_enabled" type="checkbox" checked><span>Stunden-, Tages- und Wochenzusammenfassungen erzeugen</span></label>
+      <label class="check"><input id="monitoring_log_analysis_enabled" type="checkbox" checked><span>Home-Assistant-Logs lokal clustern</span></label>
+      <label class="check"><input id="monitoring_maintenance_mode" type="checkbox"><span>Wartungsmodus – Incident-Meldungen vorübergehend pausieren</span></label>
+      <label class="check"><input id="monitoring_vacation_mode" type="checkbox"><span>Urlaubsmodus – Security-Incidents während Ruhezeiten bevorzugen</span></label>
+      <div class="field"><label for="monitoring_quiet_hours_start">Ruhezeit beginnt</label><input id="monitoring_quiet_hours_start" type="time" value="23:00"></div>
+      <div class="field"><label for="monitoring_quiet_hours_end">Ruhezeit endet</label><input id="monitoring_quiet_hours_end" type="time" value="07:00"><small>Dringende Sicherheits-, Sachschaden- und Security-Incidents durchbrechen die Ruhezeit.</small></div>
+      <div class="field"><label for="monitoring_notification_cooldown_seconds">Wiederholungsfrist in Sekunden</label><input id="monitoring_notification_cooldown_seconds" type="number" min="300" max="86400" value="3600"></div>
+      <div class="field"><label for="monitoring_context_max_chars">Maximale KI-Kontextgröße in Zeichen</label><input id="monitoring_context_max_chars" type="number" min="5000" max="100000" value="30000"></div>
+      <div class="notice"><strong>Getrennt von der Gerätesteuerung</strong><p>Diese Analyse ist read-only. Sie verändert keine Entity und erweitert keine Steuerungsfreigabe.</p></div>
+    </section>
+
+    <section class="card wide">
+      <div class="dashboard-title"><div><h2>Incidents und Systemmodell</h2><p>Lokale Detektorergebnisse, nachvollziehbare Ursachenhypothesen und Feedback.</p></div><button id="refreshMonitoring" class="secondary" type="button">Aktualisieren</button></div>
+      <div id="monitoringUnavailable" class="notice" hidden><strong>Überwachung nicht verfügbar</strong><p>Der Agent ist noch nicht gestartet oder die intelligente Überwachung ist deaktiviert.</p></div>
+      <div class="monitoring-grid">
+        <div><h3>Aktive und letzte Incidents</h3><div id="incidentList" class="record-list"></div></div>
+        <div><h3>Incident-Details</h3><div id="incidentDetails" class="record-details"><p>Wähle links einen Incident aus.</p></div></div>
+      </div>
+      <div class="monitoring-grid secondary-grid">
+        <div><h3>Systemzustand</h3><div id="healthDetails" class="record-details"></div></div>
+        <div><h3>Letzte Tageszusammenfassung</h3><div id="summaryDetails" class="record-details"></div></div>
+      </div>
+    </section>
+
+    <section class="card">
       <h2>Sicherheit und Datenschutz</h2>
       <div class="notice"><strong>Konfiguration und System bleiben read-only.</strong><p>Monitoränderungen und freigegebene Geräteaktionen werden erst nach einem separaten <code>BESTÄTIGEN …</code> im Signal-Chat aktiv.</p></div>
       <p><label class="check"><input id="allow_sensitive_config" type="checkbox"><span>Sensible Dateien wie <code>secrets.yaml</code> und <code>.storage</code> lesbar machen</span></label></p>

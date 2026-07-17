@@ -15,6 +15,8 @@ from openai import AsyncOpenAI
 
 from .config import ConfigurationError, SettingsStore
 from .ha_client import HomeAssistantReadClient
+from .monitoring.health import MonitoringHealth
+from .monitoring.query import MonitoringRuntimeView
 from .reasoning import AdaptiveReasoningRouter
 from .signal_bridge import LocalSignalBridge
 from .signal_client import SignalClient
@@ -55,7 +57,7 @@ async def ingress_only(request: web.Request, handler: Any) -> web.StreamResponse
         return await handler(request)
     if request.remote != "172.30.32.2":
         raise web.HTTPForbidden(text="Home Assistant ingress is required")
-    if request.path == "/healthz":
+    if request.path in {"/healthz", "/health/live", "/health/ready"}:
         return await handler(request)
     if not request.headers.get("X-Ingress-Path"):
         raise web.HTTPForbidden(text="Home Assistant ingress is required")
@@ -109,10 +111,14 @@ class SettingsUI:
         reload_event: Any,
         *,
         signal_bridge: LocalSignalBridge | None = None,
+        monitoring_health: MonitoringHealth | None = None,
+        monitoring_view: MonitoringRuntimeView | None = None,
     ) -> None:
         self.store = store
         self.reload_event = reload_event
         self.signal_bridge = signal_bridge
+        self.monitoring_health = monitoring_health
+        self.monitoring_view = monitoring_view
         self._settings_lock = asyncio.Lock()
         self._runner: web.AppRunner | None = None
         self._status: dict[str, Any] = {
@@ -146,6 +152,52 @@ class SettingsUI:
         application.router.add_get("/ui.js", self._asset)
         application.router.add_get("/logo.svg", self._asset)
         application.router.add_get("/healthz", self._health)
+        application.router.add_get("/health", self._monitoring_health)
+        application.router.add_get("/health/live", self._health_live)
+        application.router.add_get("/health/ready", self._health_ready)
+        application.router.add_get("/api/health", self._monitoring_health)
+        application.router.add_get("/api/entities", self._monitoring_entities)
+        application.router.add_get(
+            "/api/entities/{entity_id}", self._monitoring_entity
+        )
+        application.router.add_get(
+            "/api/entities/{entity_id}/profile", self._monitoring_entity
+        )
+        application.router.add_get(
+            "/api/entities/{entity_id}/baseline", self._monitoring_entity_baseline
+        )
+        application.router.add_get("/api/anomalies", self._monitoring_anomalies)
+        application.router.add_get(
+            "/api/anomalies/{anomaly_id}", self._monitoring_anomaly
+        )
+        application.router.add_get("/api/incidents", self._monitoring_incidents)
+        application.router.add_get(
+            "/api/incidents/{incident_id}", self._monitoring_incident
+        )
+        application.router.add_post(
+            "/api/incidents/{incident_id}/feedback", self._monitoring_feedback
+        )
+        application.router.add_post(
+            "/api/incidents/{incident_id}/acknowledge",
+            self._monitoring_acknowledge,
+        )
+        application.router.add_post(
+            "/api/incidents/{incident_id}/resolve", self._monitoring_resolve
+        )
+        application.router.add_get(
+            "/api/system-model", self._monitoring_system_model
+        )
+        application.router.add_post(
+            "/api/state-machines", self._monitoring_state_machine
+        )
+        application.router.add_get(
+            "/api/dependencies", self._monitoring_dependencies
+        )
+        application.router.add_get("/api/cycles", self._monitoring_cycles)
+        application.router.add_get(
+            "/api/summaries/{period}", self._monitoring_summaries
+        )
+        application.router.add_get("/metrics", self._metrics)
         application.router.add_get("/api/settings", self._get_settings)
         application.router.add_get("/api/timezones", self._get_timezones)
         application.router.add_put("/api/settings", self._put_settings)
@@ -172,6 +224,16 @@ class SettingsUI:
             "messages": messages,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+        if self.monitoring_health is not None:
+            if runtime_failed:
+                status = "unhealthy"
+            elif running:
+                status = "healthy"
+            else:
+                status = "starting"
+            self.monitoring_health.component(
+                "runtime", status, {"messages": messages[:10]}
+            )
 
     async def _index(self, request: web.Request) -> web.Response:
         del request
@@ -194,6 +256,250 @@ class SettingsUI:
         del request
         healthy = not bool(self._status.get("runtime_failed"))
         return web.json_response({"ok": healthy}, status=200 if healthy else 503)
+
+    async def _health_live(self, request: web.Request) -> web.Response:
+        del request
+        snapshot = self._health_snapshot()
+        return web.json_response(
+            {"ok": bool(snapshot["live"]), "status": snapshot["status"]}
+        )
+
+    async def _health_ready(self, request: web.Request) -> web.Response:
+        del request
+        snapshot = self._health_snapshot()
+        ready = bool(snapshot["ready"])
+        return web.json_response(
+            {"ok": ready, "status": snapshot["status"]},
+            status=200 if ready else 503,
+        )
+
+    async def _monitoring_health(self, request: web.Request) -> web.Response:
+        del request
+        return web.json_response({"ok": True, "health": self._health_snapshot()})
+
+    def _monitoring_target(self) -> Any:
+        if self.monitoring_view is None:
+            raise web.HTTPServiceUnavailable(
+                text="Intelligente Überwachung ist nicht verfügbar."
+            )
+        try:
+            return self.monitoring_view.target()
+        except RuntimeError as exc:
+            raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+
+    async def _monitoring_entities(self, request: web.Request) -> web.Response:
+        del request
+        model = await asyncio.to_thread(self._monitoring_target().system_model)
+        return web.json_response({"ok": True, "entities": model["entities"]})
+
+    async def _monitoring_entity(self, request: web.Request) -> web.Response:
+        try:
+            entity = await asyncio.to_thread(
+                self._monitoring_target().get_entity_profile,
+                request.match_info["entity_id"],
+            )
+        except KeyError as exc:
+            raise web.HTTPNotFound(text=str(exc)) from exc
+        return web.json_response({"ok": True, "entity": entity})
+
+    async def _monitoring_entity_baseline(
+        self, request: web.Request
+    ) -> web.Response:
+        try:
+            entity = await asyncio.to_thread(
+                self._monitoring_target().get_entity_profile,
+                request.match_info["entity_id"],
+            )
+        except KeyError as exc:
+            raise web.HTTPNotFound(text=str(exc)) from exc
+        return web.json_response(
+            {"ok": True, "baseline": entity.get("global_baseline")}
+        )
+
+    async def _monitoring_anomalies(self, request: web.Request) -> web.Response:
+        limit = self._query_limit(request, 100, 500)
+        anomalies = await asyncio.to_thread(
+            self._monitoring_target().list_anomalies, limit
+        )
+        return web.json_response({"ok": True, "anomalies": anomalies})
+
+    async def _monitoring_anomaly(self, request: web.Request) -> web.Response:
+        anomaly_id = request.match_info["anomaly_id"]
+        try:
+            target = self._monitoring_target()
+            getter = getattr(target, "get_anomaly", None)
+            if getter is not None:
+                anomaly = await asyncio.to_thread(getter, anomaly_id)
+            else:  # Compatibility with lightweight external query implementations.
+                anomalies = await asyncio.to_thread(target.list_anomalies, 500)
+                anomaly = next(
+                    item
+                    for item in anomalies
+                    if str(item.get("result_id")) == anomaly_id
+                )
+        except (KeyError, StopIteration) as exc:
+            raise web.HTTPNotFound(text="Unbekannte Anomalie") from exc
+        return web.json_response({"ok": True, "anomaly": anomaly})
+
+    async def _monitoring_incidents(self, request: web.Request) -> web.Response:
+        status = request.query.get("status") or None
+        limit = self._query_limit(request, 100, 500)
+        incidents = await asyncio.to_thread(
+            self._monitoring_target().list_incidents,
+            status=status,
+            limit=limit,
+        )
+        return web.json_response({"ok": True, "incidents": incidents})
+
+    async def _monitoring_incident(self, request: web.Request) -> web.Response:
+        incident_id = request.match_info["incident_id"]
+        try:
+            incident, feedback = await asyncio.gather(
+                asyncio.to_thread(
+                    self._monitoring_target().get_incident, incident_id
+                ),
+                asyncio.to_thread(
+                    self._monitoring_target().list_feedback,
+                    incident_id=incident_id,
+                    limit=100,
+                ),
+            )
+        except KeyError as exc:
+            raise web.HTTPNotFound(text=str(exc)) from exc
+        return web.json_response(
+            {"ok": True, "incident": incident, "feedback": feedback}
+        )
+
+    async def _monitoring_feedback(self, request: web.Request) -> web.Response:
+        self._require_request_marker(request)
+        payload = await self._json_object(request)
+        kind = payload.get("kind")
+        if not isinstance(kind, str):
+            raise web.HTTPBadRequest(text="Feedback-Art fehlt.")
+        try:
+            result = await asyncio.to_thread(
+                self._monitoring_target().record_feedback,
+                request.match_info["incident_id"],
+                kind,
+                comment=str(payload.get("comment", ""))[:2000],
+                source="admin_ui",
+                context=(
+                    payload.get("context")
+                    if isinstance(payload.get("context"), dict)
+                    else None
+                ),
+            )
+        except (KeyError, ValueError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        return web.json_response({"ok": True, **result})
+
+    async def _monitoring_acknowledge(self, request: web.Request) -> web.Response:
+        self._require_request_marker(request)
+        try:
+            incident = await asyncio.to_thread(
+                self._monitoring_target().acknowledge_incident,
+                request.match_info["incident_id"],
+            )
+        except KeyError as exc:
+            raise web.HTTPNotFound(text=str(exc)) from exc
+        return web.json_response({"ok": True, "incident": incident})
+
+    async def _monitoring_resolve(self, request: web.Request) -> web.Response:
+        self._require_request_marker(request)
+        try:
+            incident = await asyncio.to_thread(
+                self._monitoring_target().resolve_incident,
+                request.match_info["incident_id"],
+                source="admin_ui",
+            )
+        except KeyError as exc:
+            raise web.HTTPNotFound(text=str(exc)) from exc
+        return web.json_response({"ok": True, "incident": incident})
+
+    async def _monitoring_system_model(self, request: web.Request) -> web.Response:
+        del request
+        model = await asyncio.to_thread(self._monitoring_target().system_model)
+        return web.json_response({"ok": True, "system_model": model})
+
+    async def _monitoring_state_machine(self, request: web.Request) -> web.Response:
+        self._require_request_marker(request)
+        payload = await self._json_object(request)
+        try:
+            definition = await asyncio.to_thread(
+                self._monitoring_target().save_state_machine_definition,
+                payload,
+            )
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        return web.json_response({"ok": True, "state_machine": definition})
+
+    async def _monitoring_dependencies(self, request: web.Request) -> web.Response:
+        dependencies = await asyncio.to_thread(
+            self._monitoring_target().list_dependencies,
+            entity_id=request.query.get("entity_id") or None,
+            limit=self._query_limit(request, 500, 5000),
+        )
+        return web.json_response({"ok": True, "dependencies": dependencies})
+
+    async def _monitoring_cycles(self, request: web.Request) -> web.Response:
+        cycles = await asyncio.to_thread(
+            self._monitoring_target().list_operating_cycles,
+            entity_id=request.query.get("entity_id") or None,
+            limit=self._query_limit(request, 100, 500),
+        )
+        return web.json_response({"ok": True, "cycles": cycles})
+
+    async def _monitoring_summaries(self, request: web.Request) -> web.Response:
+        period = request.match_info["period"]
+        if period not in {"hourly", "daily", "weekly"}:
+            raise web.HTTPNotFound(text="Unbekannter Zusammenfassungszeitraum")
+        summaries = await asyncio.to_thread(
+            self._monitoring_target().list_summaries,
+            period=period,
+            limit=self._query_limit(request, 30, 365),
+        )
+        return web.json_response({"ok": True, "summaries": summaries})
+
+    @staticmethod
+    def _query_limit(request: web.Request, default: int, maximum: int) -> int:
+        try:
+            return max(1, min(maximum, int(request.query.get("limit", default))))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="limit muss eine Ganzzahl sein") from exc
+
+    @staticmethod
+    async def _json_object(request: web.Request) -> dict[str, Any]:
+        try:
+            payload = await request.json()
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="Ungültiges JSON") from exc
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="JSON-Objekt erwartet")
+        return payload
+
+    async def _metrics(self, request: web.Request) -> web.Response:
+        del request
+        body = (
+            self.monitoring_health.prometheus()
+            if self.monitoring_health is not None
+            else "# TYPE ha_ai_system_agent_up gauge\nha_ai_system_agent_up 1\n"
+        )
+        return web.Response(
+            text=body,
+            headers={"Content-Type": "text/plain; version=0.0.4; charset=utf-8"},
+        )
+
+    def _health_snapshot(self) -> dict[str, Any]:
+        if self.monitoring_health is not None:
+            return self.monitoring_health.snapshot()
+        healthy = not bool(self._status.get("runtime_failed"))
+        return {
+            "status": "healthy" if healthy else "unhealthy",
+            "live": True,
+            "ready": healthy and bool(self._status.get("agent_running")),
+            "components": {},
+            "metrics": {},
+        }
 
     async def _get_settings(self, request: web.Request) -> web.Response:
         del request

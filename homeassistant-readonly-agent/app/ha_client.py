@@ -5,7 +5,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 import aiohttp
@@ -30,6 +30,9 @@ class HomeAssistantReadClient:
         "get_config",
         "subscribe_events",
         "config/auth/list",
+        "config/entity_registry/list",
+        "config/device_registry/list",
+        "config/area_registry/list",
     }
     MAX_JSON_BYTES = 10 * 1024 * 1024
     MAX_LOG_BYTES = 2 * 1024 * 1024
@@ -42,6 +45,20 @@ class HomeAssistantReadClient:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
+        self._event_connection_observer: (
+            Callable[[str, dict[str, Any]], None] | None
+        ) = None
+
+    def set_event_connection_observer(
+        self, observer: Callable[[str, dict[str, Any]], None]
+    ) -> None:
+        self._event_connection_observer = observer
+
+    def _observe_event_connection(
+        self, status: str, details: dict[str, Any]
+    ) -> None:
+        if self._event_connection_observer is not None:
+            self._event_connection_observer(status, details)
 
     async def _get_json(
         self, base: str, path: str, *, params: dict[str, Any] | None = None
@@ -129,6 +146,23 @@ class HomeAssistantReadClient:
                 or "system-admin" in user.get("group_ids", [])
             )
         )
+
+    async def monitoring_registries(self) -> dict[str, list[dict[str, Any]]]:
+        """Read semantic registry metadata without exposing a generic command."""
+        commands = {
+            "entities": "config/entity_registry/list",
+            "devices": "config/device_registry/list",
+            "areas": "config/area_registry/list",
+        }
+        result: dict[str, list[dict[str, Any]]] = {}
+        for name, command in commands.items():
+            payload = await self._one_shot_ws_command(command)
+            if not isinstance(payload, list):
+                raise RuntimeError(
+                    f"Unexpected Home Assistant {name} registry response"
+                )
+            result[name] = [item for item in payload if isinstance(item, dict)]
+        return result
 
     async def control_entity(
         self,
@@ -239,6 +273,9 @@ class HomeAssistantReadClient:
                             "Home Assistant rejected event subscription: "
                             f"{subscription.get('error', {})}"
                         )
+                    self._observe_event_connection(
+                        "healthy", {"subscribed": True}
+                    )
                     delay = 1
                     async for message in websocket:
                         if message.type == aiohttp.WSMsgType.TEXT:
@@ -252,9 +289,16 @@ class HomeAssistantReadClient:
                             aiohttp.WSMsgType.ERROR,
                         }:
                             break
+                    self._observe_event_connection(
+                        "degraded", {"reason": "event stream closed"}
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # network reconnect boundary
+                self._observe_event_connection(
+                    "degraded",
+                    {"reason": f"{type(exc).__name__}: {exc}"[:500]},
+                )
                 LOGGER.warning(
                     "Home Assistant event stream disconnected: %s; retrying in %ss",
                     exc,

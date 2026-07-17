@@ -1,5 +1,5 @@
 name: "HA AI System Agent"
-version: "0.8.0"
+version: "1.0.0"
 slug: "homeassistant_readonly_agent"
 description: >-
   HA AI System Agent with read-only diagnostics, optional confirmed entity control, Signal chat and persistent monitors.
@@ -42,6 +42,24 @@ options:
   anomaly_sensitivity: "balanced"
   memory_retention_days: 365
   max_memories_per_sender: 200
+  intelligent_monitoring_enabled: true
+  monitoring_event_retention_days: 7
+  monitoring_minimum_baseline_samples: 20
+  monitoring_unavailable_grace_period_seconds: 900
+  monitoring_incident_grouping_window_seconds: 120
+  monitoring_notification_minimum_priority: 50
+  monitoring_update_timeout_multiplier: 3
+  monitoring_llm_analysis_enabled: true
+  monitoring_notifications_enabled: true
+  monitoring_notify_on_resolve: true
+  monitoring_daily_summaries_enabled: true
+  monitoring_log_analysis_enabled: true
+  monitoring_maintenance_mode: false
+  monitoring_vacation_mode: false
+  monitoring_quiet_hours_start: "23:00"
+  monitoring_quiet_hours_end: "07:00"
+  monitoring_notification_cooldown_seconds: 3600
+  monitoring_context_max_chars: 30000
   entity_control_enabled: false
   controllable_entities: []
   allow_sensitive_config: false
@@ -74,6 +92,24 @@ schema:
   anomaly_sensitivity: list(conservative|balanced|sensitive)
   memory_retention_days: int(1,3650)
   max_memories_per_sender: int(10,1000)
+  intelligent_monitoring_enabled: bool
+  monitoring_event_retention_days: int(1,90)
+  monitoring_minimum_baseline_samples: int(5,500)
+  monitoring_unavailable_grace_period_seconds: int(0,86400)
+  monitoring_incident_grouping_window_seconds: int(10,3600)
+  monitoring_notification_minimum_priority: int(0,100)
+  monitoring_update_timeout_multiplier: int(2,20)
+  monitoring_llm_analysis_enabled: bool
+  monitoring_notifications_enabled: bool
+  monitoring_notify_on_resolve: bool
+  monitoring_daily_summaries_enabled: bool
+  monitoring_log_analysis_enabled: bool
+  monitoring_maintenance_mode: bool
+  monitoring_vacation_mode: bool
+  monitoring_quiet_hours_start: str
+  monitoring_quiet_hours_end: str
+  monitoring_notification_cooldown_seconds: int(300,86400)
+  monitoring_context_max_chars: int(5000,100000)
   entity_control_enabled: bool
   controllable_entities:
     - str

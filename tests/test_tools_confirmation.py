@@ -73,6 +73,35 @@ class FakeMonitors:
         self.deleted.append(monitor_id)
 
 
+class FakeMonitoring:
+    def __init__(self) -> None:
+        self.feedback: list[dict[str, Any]] = []
+
+    def list_incidents(
+        self, *, status: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        return [{"incident_id": "incident-1", "status": status, "limit": limit}]
+
+    def get_incident(self, incident_id: str) -> dict[str, Any]:
+        return {"incident_id": incident_id}
+
+    def get_entity_profile(self, entity_id: str) -> dict[str, Any]:
+        return {"profile": {"entity_id": entity_id}}
+
+    def monitoring_health(self) -> dict[str, Any]:
+        return {"status": "healthy", "ready": True}
+
+    def record_feedback(
+        self, incident_id: str, kind: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        value = {"incident_id": incident_id, "kind": kind, **kwargs}
+        self.feedback.append(value)
+        return value
+
+    def acknowledge_incident(self, incident_id: str) -> dict[str, Any]:
+        return {"incident_id": incident_id, "status": "ACKNOWLEDGED"}
+
+
 class ToolConfirmationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -142,6 +171,50 @@ class ToolConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("create_cron_job", names)
         self.assertNotIn("control_entity", names)
 
+    async def test_monitoring_queries_are_read_only_and_optional(self) -> None:
+        self.assertNotIn(
+            "list_incidents",
+            {item["name"] for item in self.registry.definitions(False)},
+        )
+        registry = ToolRegistry(
+            ha=self.ha,  # type: ignore[arg-type]
+            config_reader=self.registry.config_reader,
+            storage=self.storage,
+            monitors=self.monitors,  # type: ignore[arg-type]
+            default_log_lines=500,
+            monitoring=FakeMonitoring(),
+        )
+        names = {item["name"] for item in registry.definitions(False)}
+        self.assertTrue(
+            {
+                "list_incidents",
+                "get_incident",
+                "get_entity_profile",
+                "get_monitoring_health",
+            }.issubset(names)
+        )
+        incidents = await registry.execute(
+            "list_incidents",
+            {"status": "DETECTED", "limit": 7},
+            sender="+49111",
+            allow_monitor_changes=False,
+        )
+        self.assertEqual(
+            incidents,
+            [{"incident_id": "incident-1", "status": "DETECTED", "limit": 7}],
+        )
+        self.assertEqual(
+            (
+                await registry.execute(
+                    "get_monitoring_health",
+                    {},
+                    sender="+49111",
+                    allow_monitor_changes=False,
+                )
+            )["status"],
+            "healthy",
+        )
+
     async def test_entity_control_requires_ui_enablement_evidence_and_confirmation(
         self,
     ) -> None:
@@ -196,6 +269,7 @@ class ToolConfirmationTests(unittest.IsolatedAsyncioTestCase):
         result = await registry.confirm_action("+49111", proposal["confirmation_token"])
         self.assertTrue(result["accepted"])
         self.assertEqual(self.ha.controls, [("light.kitchen", "turn_on", None, None)])
+
         replay = await registry.confirm_action(
             "+49111", proposal["confirmation_token"]
         )
@@ -235,6 +309,36 @@ class ToolConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 trusted_user_message="Schalte light.garage ein.",
             )
 
+    async def test_signal_incident_feedback_requires_exact_confirmation(self) -> None:
+        monitoring = FakeMonitoring()
+        registry = ToolRegistry(
+            ha=self.ha,  # type: ignore[arg-type]
+            config_reader=self.registry.config_reader,
+            storage=self.storage,
+            monitors=self.monitors,  # type: ignore[arg-type]
+            default_log_lines=500,
+            monitoring=monitoring,  # type: ignore[arg-type]
+        )
+        user_message = "Incident incident-1 ist ein Fehlalarm"
+        proposal = await registry.execute(
+            "record_incident_feedback",
+            {
+                "incident_id": "incident-1",
+                "kind": "FALSE_POSITIVE",
+                "comment": "",
+                "remind_after_seconds": None,
+                "request_evidence": "ist ein Fehlalarm",
+            },
+            sender="+49111",
+            allow_monitor_changes=True,
+            trusted_user_message=user_message,
+        )
+        self.assertEqual(monitoring.feedback, [])
+        await registry.confirm_action(
+            "+49111", str(proposal["confirmation_token"])
+        )
+        self.assertEqual(monitoring.feedback[0]["kind"], "FALSE_POSITIVE")
+
     async def test_memory_tools_accept_only_exact_current_user_evidence(self) -> None:
         message = "Bitte merke dir: Die Kellerpumpe läuft normalerweise nachts."
         memory = await self.registry.execute(
@@ -262,6 +366,21 @@ class ToolConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 sender="+49111",
                 allow_monitor_changes=True,
                 trusted_user_message="Prüfe bitte die Logs.",
+            )
+        with self.assertRaises(PermissionError):
+            await self.registry.execute(
+                "remember_user_note",
+                {
+                    "evidence": "Meine Diabetes-Diagnose soll gespeichert werden.",
+                    "category": "context",
+                    "importance": 5,
+                    "ttl_days": 365,
+                },
+                sender="+49111",
+                allow_monitor_changes=True,
+                trusted_user_message=(
+                    "Meine Diabetes-Diagnose soll gespeichert werden."
+                ),
             )
         deletion = await self.registry.execute(
             "forget_user_note",

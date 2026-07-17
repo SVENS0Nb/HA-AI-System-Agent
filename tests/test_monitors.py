@@ -108,6 +108,77 @@ class MonitorServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.service._trigger_queue.qsize(), 1)  # noqa: SLF001
 
+    async def test_queue_overflow_retains_trigger_in_durable_outbox(self) -> None:
+        monitor = self.storage.add_monitor(
+            name="durable-overflow",
+            kind="event",
+            spec={"event_type": "alarm", "cooldown_seconds": 0},
+            task="notify",
+            recipient="+49111",
+        )
+        self.service._trigger_queue = asyncio.Queue(maxsize=1)  # noqa: SLF001
+        self.service._enqueue(monitor, {"sequence": 1}, "default")  # noqa: SLF001
+        self.service._enqueue(monitor, {"sequence": 2}, "default")  # noqa: SLF001
+        self.assertEqual(self.service._trigger_queue.qsize(), 1)  # noqa: SLF001
+        pending = self.storage.list_pending_monitor_triggers()
+        self.assertEqual(len(pending), 2)
+        self.assertEqual([item["context"]["sequence"] for item in pending], [1, 2])
+
+        await self.service.stop()
+        delivered: list[int] = []
+
+        async def callback(_monitor: dict[str, Any], context: dict[str, Any]) -> None:
+            delivered.append(int(context["sequence"]))
+
+        self.service.set_run_callback(callback)
+        self.service._running = True  # noqa: SLF001
+        self.service._workers = [  # noqa: SLF001
+            asyncio.create_task(self.service._trigger_worker())  # noqa: SLF001
+        ]
+        self.service._refill_trigger_queue()  # noqa: SLF001
+        for _ in range(100):
+            if len(delivered) == 2:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(delivered, [1, 2])
+        self.assertEqual(self.storage.list_pending_monitor_triggers(), [])
+
+    async def test_concurrent_same_key_triggers_are_serialized_without_loss(self) -> None:
+        monitor = self.storage.add_monitor(
+            name="serialized",
+            kind="event",
+            spec={"event_type": "alarm", "cooldown_seconds": 0},
+            task="notify",
+            recipient="+49111",
+        )
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        delivered: list[int] = []
+
+        async def callback(_monitor: dict[str, Any], context: dict[str, Any]) -> None:
+            sequence = int(context["sequence"])
+            delivered.append(sequence)
+            if sequence == 1:
+                first_started.set()
+                await release_first.wait()
+
+        self.service.set_run_callback(callback)
+        self.service._running = True  # noqa: SLF001
+        self.service._workers = [  # noqa: SLF001
+            asyncio.create_task(self.service._trigger_worker())  # noqa: SLF001
+            for _ in range(2)
+        ]
+        self.service._enqueue(monitor, {"sequence": 1}, "default")  # noqa: SLF001
+        self.service._enqueue(monitor, {"sequence": 2}, "default")  # noqa: SLF001
+
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        release_first.set()
+        await asyncio.wait_for(self.service._trigger_queue.join(), timeout=1)  # noqa: SLF001
+
+        self.assertEqual(delivered, [1, 2])
+        self.assertEqual(self.storage.list_pending_monitor_triggers(), [])
+
     async def test_running_service_delivers_event_through_worker(self) -> None:
         service = MonitorService(
             self.storage,

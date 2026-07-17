@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.0.0
+
+- Gerichteter Abhängigkeitsgraph aus read-only Automation-/Package-Analyse mit Herkunft und Konfidenz
+- Konfigurierbare Zustandsautomaten, robuste Betriebszyklus-Erkennung und Prüfung erwarteter Sensorwirkungen
+- Geschützte Sofortregeln für explizite Rauch-, Gas-, Wasser-/Feuchte-, Hitze- und Sicherheitsalarme mit Recovery
+- Erkennung wiederholter Home-Assistant-Neustarts als deduplizierter System-Incident
+- Begrenztes, geschwärztes Log-Template-Clustering mit Erkennung neuer oder stark ansteigender Cluster
+- Strukturierte Incident-Analyse über OpenAI Structured Outputs mit strikter Validierung, Audit und deterministischem Offline-Fallback
+- Deduplizierte Signal-Incident-Meldungen pro Empfänger mit Eskalation, Cooldown, Ruhezeiten, Wartungs-/Urlaubsmodus und Entwarnung
+- Sieben Feedbackarten über Admin-UI/API und bestätigten Signal-Workflow; geschützte Sicherheitsregeln können nicht automatisch unterdrückt werden
+- Maschinenlesbare und verständliche Stunden-/Tages-/Wochenzusammenfassungen sowie aktionsfreier JSONL-Replay-Modus
+- Erweiterte Admin-Oberfläche und API für Incidents, Anomalien, Profile/Baselines, Abhängigkeiten, Zyklen, Systemmodell, Health und Zusammenfassungen
+- SQLite-Migrationen 2–5 mit Graph, Zustandsinstanzen, Zyklen, Feedback, Summaries, indiziertem Lieferstatus, Logclustern, Config-Snapshots, Quelleninvalidierung, LLM-Audit und wiederanlaufbarer Eventverarbeitung
+- Sicherheitsalarme werden schon aus dem Start-Snapshot erkannt; Stream-Lücken und verworfene Normalereignisse werden über Zustands-Snapshots abgeglichen
+- Korrigierter Incident-Lebenszyklus für Recovery, stabile Langzeitbefunde, Empfängeränderungen und einmalige gegenüber fortbestehenden Anomalien
+- Harte LLM-Kontextgrenze, belastbare UTF-8-Audits, konsistente Relations-/Retention-Bereinigung und skalierbare Zeitraumzusammenfassungen
+- Korrekte Package-/Automation-Invalidierung ohne Service-als-Entity-Fehlklassifikation; Gesundheitsdaten werden lokal aus Erinnerungen ausgeschlossen
+- Deadlock-freie Signal-Zustellwiederholung; bei intelligentem Monitoring beobachtet die Legacy-Anomaliepipeline keine neuen Events, stellt aber noch offene Altmeldungen zu
+- Dauerhafte Monitor-Trigger-Outbox, atomare Incident-/Benachrichtigungsübergänge und evidenzgebundene LLM-Analysen verhindern Verluste, doppelte Baselines und veraltete Meldungsabschlüsse
+- Gleichartige Monitor-Trigger werden verlustfrei serialisiert; Event-Recovery arbeitet pro Entity chronologisch und analysiert überholte Evidenz ohne Zustandsrücksprung
+- Bestätigte und quittierte Incidents behalten ihren Lifecycle; Teilentwarnungen bereinigen Evidenz und Analyse, Incident-Rollover werden als echte SQLite-Transaktion ausgeführt
+- Gerätesteuerungsbestätigungen nennen Entity, lokal aufgelösten Dienst, Parameter und Code deterministisch außerhalb der Modellausgabe
+- Signal-Chat, persistente Monitore und die optional bestätigte Entity-Steuerung bleiben in ihren bisherigen Sicherheitsgrenzen erhalten
+
+## 0.9.0
+
+- Neue lokale, LLM-unabhängige Monitoring-Pipeline mit validierten und deduplizierten Home-Assistant-Ereignissen
+- Semantische Entity-Profile aus State-, Entity-, Device- und Area-Metadaten mit Herkunft und Konfidenz
+- Begrenzte Rolling Features sowie globale, saisonale, Tages- und Zeitfenster-Baselines mit robusten Statistiken
+- Erklärbare Detektoren für Verfügbarkeit, numerische Abweichungen, Zustandsfrequenz und ausbleibende Updates
+- Incident-Gruppierung nach Integration, Gerät, Bereich, Korrelation oder Entity inklusive Kritikalität, Priorität und Recovery
+- Eigene versionierte SQLite-Migrationen, Retention, Komponenten-Health, Readiness und Prometheus-Metriken
+- Schreibgeschützte Signal-Werkzeuge für Incidents, Profile und Monitoring-Health
+- Neue Admin-UI-Konfiguration; bestehender Signal-Chat und bestätigte Entity-Steuerung bleiben unverändert isoliert
+
 ## 0.8.0
 
 - Optionaler, standardmäßig deaktivierter Signal-Modus für den eigenen Chat „Notiz an mich“

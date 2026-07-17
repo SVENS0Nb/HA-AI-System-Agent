@@ -37,6 +37,43 @@ configuration:
     name: Maximale Erinnerungsdauer in Tagen
   max_memories_per_sender:
     name: Maximale Erinnerungen pro Absender
+  intelligent_monitoring_enabled:
+    name: Intelligente Überwachung aktivieren
+    description: Verarbeitet Home-Assistant-Ereignisse lokal zu Profilen, Baselines, Anomalien und gruppierten Incidents.
+  monitoring_event_retention_days:
+    name: Ereignisaufbewahrung in Tagen
+  monitoring_minimum_baseline_samples:
+    name: Minimale Baseline-Stichproben
+  monitoring_unavailable_grace_period_seconds:
+    name: Karenzzeit für nicht verfügbare Geräte
+  monitoring_incident_grouping_window_seconds:
+    name: Zeitfenster zur Incident-Gruppierung
+  monitoring_notification_minimum_priority:
+    name: Minimale Benachrichtigungspriorität in Prozent
+  monitoring_update_timeout_multiplier:
+    name: Faktor für ausbleibende Aktualisierungen
+  monitoring_llm_analysis_enabled:
+    name: Strukturierte KI-Incident-Analyse aktivieren
+  monitoring_notifications_enabled:
+    name: Proaktive Incident-Meldungen senden
+  monitoring_notify_on_resolve:
+    name: Entwarnungen senden
+  monitoring_daily_summaries_enabled:
+    name: Stunden-, Tages- und Wochenzusammenfassungen erzeugen
+  monitoring_log_analysis_enabled:
+    name: Logs lokal clustern und überwachen
+  monitoring_maintenance_mode:
+    name: Wartungsmodus aktivieren
+  monitoring_vacation_mode:
+    name: Urlaubsmodus aktivieren
+  monitoring_quiet_hours_start:
+    name: Beginn der Ruhezeit (HH:MM)
+  monitoring_quiet_hours_end:
+    name: Ende der Ruhezeit (HH:MM)
+  monitoring_notification_cooldown_seconds:
+    name: Wiederholungsfrist für Meldungen in Sekunden
+  monitoring_context_max_chars:
+    name: Maximale KI-Kontextgröße in Zeichen
   entity_control_enabled:
     name: Bestätigte Gerätesteuerung aktivieren
     description: Erlaubt ausschließlich fest definierte Aktionen auf unterstützten Entity-Domänen; jede Aktion benötigt eine Signal-Bestätigung.
