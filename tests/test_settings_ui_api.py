@@ -11,6 +11,8 @@ from unittest.mock import patch
 from aiohttp.test_utils import TestClient, TestServer
 
 from app.config import SettingsStore
+from app.monitoring.health import MonitoringHealth
+from app.monitoring.query import MonitoringRuntimeView
 from app.settings_ui import SettingsUI
 
 
@@ -50,6 +52,70 @@ class FakeSignalBridge:
         self.removed_account = account
 
 
+class FakeMonitoring:
+    def __init__(self) -> None:
+        self.incident = {
+            "incident_id": "incident-1",
+            "title": "Test incident",
+            "status": "DETECTED",
+            "priority_score": 0.8,
+            "affected_entities": ["sensor.test"],
+        }
+
+    def list_incidents(self, *, status=None, limit=100):
+        del limit
+        if status and status != self.incident["status"]:
+            return []
+        return [self.incident]
+
+    def get_incident(self, incident_id):
+        if incident_id != "incident-1":
+            raise KeyError("unknown")
+        return self.incident
+
+    def get_entity_profile(self, entity_id):
+        if entity_id != "sensor.test":
+            raise KeyError("unknown")
+        return {"profile": {"entity_id": entity_id}, "global_baseline": {"count": 20}}
+
+    def list_anomalies(self, limit=100):
+        del limit
+        return [{"result_id": "anomaly-1", "anomaly_type": "test"}]
+
+    def list_dependencies(self, *, entity_id=None, limit=500):
+        del entity_id, limit
+        return [{"source": "switch.test", "target": "sensor.test", "confidence": 0.8}]
+
+    def list_operating_cycles(self, *, entity_id=None, limit=100):
+        del entity_id, limit
+        return [{"cycle_id": "cycle-1"}]
+
+    def list_summaries(self, *, period, limit=30):
+        del limit
+        return [{"period": period, "text": "Summary"}]
+
+    def list_feedback(self, *, incident_id=None, limit=100):
+        del incident_id, limit
+        return []
+
+    def system_model(self):
+        return {"entities": [{"entity_id": "sensor.test"}], "dependencies": []}
+
+    def save_state_machine_definition(self, definition):
+        return {**definition, "enabled": bool(definition.get("enabled", True))}
+
+    def record_feedback(self, incident_id, kind, **kwargs):
+        del kwargs
+        return {"incident": self.incident, "feedback": {"incident_id": incident_id, "kind": kind}}
+
+    def acknowledge_incident(self, incident_id):
+        return {**self.incident, "incident_id": incident_id, "status": "ACKNOWLEDGED"}
+
+    def resolve_incident(self, incident_id, **kwargs):
+        del kwargs
+        return {**self.incident, "incident_id": incident_id, "status": "RESOLVED"}
+
+
 class SettingsUIAPITests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -83,10 +149,16 @@ class SettingsUIAPITests(unittest.IsolatedAsyncioTestCase):
         self.environment.start()
         self.reload = asyncio.Event()
         self.bridge = FakeSignalBridge()
+        self.health = MonitoringHealth(software_version="test")
+        self.monitoring = FakeMonitoring()
+        self.monitoring_view = MonitoringRuntimeView()
+        self.monitoring_view.attach(self.monitoring)  # type: ignore[arg-type]
         self.ui = SettingsUI(
             SettingsStore(self.options, self.overrides),
             self.reload,
             signal_bridge=self.bridge,  # type: ignore[arg-type]
+            monitoring_health=self.health,
+            monitoring_view=self.monitoring_view,
         )
         self.client = TestClient(TestServer(self.ui.create_application()))
         await self.client.start_server()
@@ -104,6 +176,7 @@ class SettingsUIAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("HA AI System Agent", html)
         self.assertIn('<select id="timezone">', html)
         self.assertIn('id="signal_self_chat_enabled"', html)
+        self.assertIn('id="intelligent_monitoring_enabled"', html)
         self.assertNotIn("<script>", html)
         self.assertNotIn("unsafe-inline", response.headers["Content-Security-Policy"])
         self.assertEqual((await self.client.get("/ui.css")).status, 200)
@@ -121,6 +194,7 @@ class SettingsUIAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["settings"]["anomaly_sensitivity"], "balanced")
         self.assertFalse(payload["settings"]["entity_control_enabled"])
         self.assertFalse(payload["settings"]["signal_self_chat_enabled"])
+        self.assertTrue(payload["settings"]["intelligent_monitoring_enabled"])
         self.assertEqual(payload["settings"]["controllable_entities"], [])
         denied = await self.client.put("/api/settings", json={"openai_model": "new"})
         self.assertEqual(denied.status, 403)
@@ -154,6 +228,18 @@ class SettingsUIAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 503)
         self.assertFalse((await response.json())["ok"])
 
+    async def test_structured_health_and_prometheus_metrics(self) -> None:
+        self.health.component("database", "healthy")
+        self.health.component("event_pipeline", "healthy")
+        self.ui.set_status(running=True, messages=["ready"])
+        ready = await self.client.get("/health/ready")
+        self.assertEqual(ready.status, 200)
+        details = await (await self.client.get("/api/health")).json()
+        self.assertTrue(details["health"]["ready"])
+        metrics = await self.client.get("/metrics")
+        self.assertEqual(metrics.status, 200)
+        self.assertIn("ha_ai_system_agent_ready 1", await metrics.text())
+
     async def test_timezone_api_returns_safe_iana_dropdown_values(self) -> None:
         response = await self.client.get("/api/timezones")
         self.assertEqual(response.status, 200)
@@ -162,6 +248,51 @@ class SettingsUIAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("America/New_York", zones)
         self.assertNotIn("localtime", zones)
         self.assertNotIn("posixrules", zones)
+
+    async def test_monitoring_api_reads_and_feedback_mutations(self) -> None:
+        incidents = await (await self.client.get("/api/incidents")).json()
+        self.assertEqual(incidents["incidents"][0]["incident_id"], "incident-1")
+        entity = await (
+            await self.client.get("/api/entities/sensor.test/profile")
+        ).json()
+        self.assertEqual(entity["entity"]["global_baseline"]["count"], 20)
+        baseline = await (
+            await self.client.get("/api/entities/sensor.test/baseline")
+        ).json()
+        self.assertEqual(baseline["baseline"]["count"], 20)
+        self.assertEqual(
+            (await (await self.client.get("/api/anomalies/anomaly-1")).json())[
+                "anomaly"
+            ]["anomaly_type"],
+            "test",
+        )
+        denied = await self.client.post(
+            "/api/incidents/incident-1/feedback", json={"kind": "RELEVANT"}
+        )
+        self.assertEqual(denied.status, 403)
+        feedback = await self.client.post(
+            "/api/incidents/incident-1/feedback",
+            json={"kind": "RELEVANT"},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        self.assertEqual(feedback.status, 200)
+        self.assertEqual((await feedback.json())["feedback"]["kind"], "RELEVANT")
+        resolved = await self.client.post(
+            "/api/incidents/incident-1/resolve",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        self.assertEqual((await resolved.json())["incident"]["status"], "RESOLVED")
+        machine = await self.client.post(
+            "/api/state-machines",
+            json={
+                "machine_id": "test-machine",
+                "entity_id": "sensor.test",
+                "allowed_transitions": {"idle": ["active"]},
+                "max_duration_seconds": {"active": 60},
+            },
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        self.assertEqual((await machine.json())["state_machine"]["machine_id"], "test-machine")
 
     async def test_integrated_signal_onboarding_is_admin_api_only(self) -> None:
         status = await (await self.client.get("/api/signal/status")).json()

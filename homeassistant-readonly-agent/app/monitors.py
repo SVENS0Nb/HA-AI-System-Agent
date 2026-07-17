@@ -16,7 +16,9 @@ from .storage import Storage
 LOGGER = logging.getLogger(__name__)
 RunCallback = Callable[[dict[str, Any], dict[str, Any]], Awaitable[None]]
 StateObserver = Callable[[dict[str, Any]], Awaitable[None]]
-QueueItem = tuple[dict[str, Any], dict[str, Any], str, int]
+EventObserver = Callable[[dict[str, Any]], Awaitable[None]]
+StateSnapshotObserver = Callable[[list[dict[str, Any]]], Awaitable[None]]
+QueueItem = tuple[str, dict[str, Any], dict[str, Any], str, int]
 
 
 class MonitorService:
@@ -34,11 +36,15 @@ class MonitorService:
         self.reconcile_interval_seconds = reconcile_interval_seconds
         self._run_callback: RunCallback | None = None
         self._state_observer: StateObserver | None = None
+        self._event_observer: EventObserver | None = None
+        self._state_snapshot_observer: StateSnapshotObserver | None = None
         self._pending: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._trigger_queue: asyncio.Queue[QueueItem] = asyncio.Queue(maxsize=200)
         self._workers: list[asyncio.Task[None]] = []
+        self._queued_trigger_ids: set[str] = set()
         self._reconciler: asyncio.Task[None] | None = None
         self._inflight: set[tuple[str, str]] = set()
+        self._trigger_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._enabled_monitors: list[dict[str, Any]] = []
         self._monitor_cache_initialized = False
         self._running = False
@@ -49,6 +55,14 @@ class MonitorService:
     def set_state_observer(self, observer: StateObserver) -> None:
         self._state_observer = observer
 
+    def set_event_observer(self, observer: EventObserver) -> None:
+        """Observe every HA event without changing monitor dispatch semantics."""
+        self._event_observer = observer
+
+    def set_state_snapshot_observer(self, observer: StateSnapshotObserver) -> None:
+        """Reconcile event-stream gaps from bounded current-state snapshots."""
+        self._state_snapshot_observer = observer
+
     async def start(self) -> None:
         self._running = True
         self.scheduler.start()
@@ -57,6 +71,7 @@ class MonitorService:
             asyncio.create_task(self._trigger_worker(), name=f"monitor-worker-{index}")
             for index in range(2)
         ]
+        self._refill_trigger_queue()
         await self._reconcile_entity_monitors()
         self._reconciler = asyncio.create_task(
             self._reconcile_loop(), name="monitor-reconciliation"
@@ -74,6 +89,15 @@ class MonitorService:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._pending.clear()
         self._workers.clear()
+        self._queued_trigger_ids.clear()
+        self._trigger_locks.clear()
+        while not self._trigger_queue.empty():
+            try:
+                self._trigger_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self._trigger_queue.task_done()
         self._reconciler = None
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
@@ -144,16 +168,21 @@ class MonitorService:
 
     async def _reconcile_entity_monitors(self) -> None:
         monitors = [item for item in self._enabled_monitors if item["kind"] == "entity"]
-        if not monitors:
+        if not monitors and self._state_snapshot_observer is None:
             return
         try:
-            states = {
-                str(item.get("entity_id")): str(item.get("state", ""))
-                for item in await self.ha.states()
-            }
+            snapshot = await self.ha.states()
         except Exception:
             LOGGER.exception("Cannot reconcile entity monitors")
             return
+        if self._state_snapshot_observer is not None:
+            try:
+                await self._state_snapshot_observer(snapshot)
+            except Exception:
+                LOGGER.exception("Cannot reconcile monitoring state snapshot")
+        states = {
+            str(item.get("entity_id")): str(item.get("state", "")) for item in snapshot
+        }
         for monitor in monitors:
             for entity_id in monitor["spec"]["entity_ids"]:
                 if entity_id in states:
@@ -204,6 +233,11 @@ class MonitorService:
 
     async def _consume_events(self) -> None:
         async for event in self.ha.events():
+            if self._event_observer is not None:
+                try:
+                    await self._event_observer(event)
+                except Exception:
+                    LOGGER.exception("Event observer rejected an event")
             event_type = str(event.get("event_type", ""))
             if event_type == "state_changed":
                 self._handle_state_change(event)
@@ -227,7 +261,9 @@ class MonitorService:
                 self._consider_entity_state(
                     monitor,
                     entity_id,
-                    new_state if isinstance(data.get("new_state"), dict) else "unavailable",
+                    new_state
+                    if isinstance(data.get("new_state"), dict)
+                    else "unavailable",
                     entity_missing=not isinstance(data.get("new_state"), dict),
                 )
 
@@ -300,66 +336,148 @@ class MonitorService:
         self, monitor: dict[str, Any], context: dict[str, Any], run_key: str
     ) -> None:
         try:
-            self._trigger_queue.put_nowait((monitor, context, run_key, 0))
+            trigger = self.storage.add_monitor_trigger(
+                str(monitor["id"]), context, run_key
+            )
+        except Exception:
+            LOGGER.exception("Cannot persist monitor trigger for %s", monitor.get("id"))
+            return
+        self._queue_stored_trigger(trigger, monitor=monitor)
+
+    def _queue_stored_trigger(
+        self,
+        trigger: dict[str, Any],
+        *,
+        monitor: dict[str, Any] | None = None,
+    ) -> bool:
+        trigger_id = str(trigger["id"])
+        if trigger_id in self._queued_trigger_ids:
+            return True
+        if monitor is None:
+            try:
+                monitor = self.storage.get_monitor(str(trigger["monitor_id"]))
+            except KeyError:
+                self.storage.complete_monitor_trigger(trigger_id)
+                return False
+        try:
+            self._trigger_queue.put_nowait(
+                (
+                    trigger_id,
+                    monitor,
+                    dict(trigger["context"]),
+                    str(trigger["run_key"]),
+                    int(trigger.get("attempts", 0)),
+                )
+            )
         except asyncio.QueueFull:
-            LOGGER.error("Monitor trigger queue is full; dropped %s", monitor["id"])
+            LOGGER.info(
+                "Monitor trigger queue is full; trigger %s remains durable",
+                trigger_id,
+            )
+            return False
+        self._queued_trigger_ids.add(trigger_id)
+        return True
+
+    def _refill_trigger_queue(self) -> None:
+        available = self._trigger_queue.maxsize - self._trigger_queue.qsize()
+        if available <= 0:
+            return
+        for trigger in self.storage.list_pending_monitor_triggers(limit=available * 2):
+            if not self._queue_stored_trigger(trigger):
+                if self._trigger_queue.full():
+                    break
 
     async def _trigger_worker(self) -> None:
         while True:
-            monitor, context, run_key, attempt = await self._trigger_queue.get()
+            (
+                trigger_id,
+                monitor,
+                context,
+                run_key,
+                attempt,
+            ) = await self._trigger_queue.get()
+            requeued = False
             try:
-                await self._trigger(monitor, context, run_key, attempt)
+                await self._trigger(
+                    monitor,
+                    context,
+                    run_key,
+                    attempt,
+                    propagate_failure=True,
+                )
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 LOGGER.exception(
                     "Monitor worker recovered after failure for %s", monitor.get("id")
                 )
+                next_attempt = attempt + 1
+                if next_attempt <= 2 and self._running:
+                    self.storage.update_monitor_trigger_attempt(
+                        trigger_id, next_attempt, f"{type(exc).__name__}: {exc}"
+                    )
+                    await asyncio.sleep(2**next_attempt)
+                    try:
+                        self._trigger_queue.put_nowait(
+                            (trigger_id, monitor, context, run_key, next_attempt)
+                        )
+                    except asyncio.QueueFull:
+                        pass
+                    else:
+                        requeued = True
+                else:
+                    self.storage.fail_monitor_trigger(
+                        trigger_id, f"{type(exc).__name__}: {exc}"
+                    )
+            else:
+                self.storage.complete_monitor_trigger(trigger_id)
             finally:
+                if not requeued:
+                    self._queued_trigger_ids.discard(trigger_id)
                 self._trigger_queue.task_done()
+                if self._running:
+                    self._refill_trigger_queue()
 
     async def _trigger(
         self,
         monitor: dict[str, Any],
         context: dict[str, Any],
         run_key: str,
-        attempt: int,
+        _attempt: int,
+        *,
+        propagate_failure: bool = False,
     ) -> None:
         try:
             monitor = self.storage.get_monitor(monitor["id"])
         except KeyError:
             return
         inflight_key = (monitor["id"], run_key)
-        if (
-            not monitor["enabled"]
-            or self._in_cooldown(monitor, run_key)
-            or inflight_key in self._inflight
-        ):
-            return
-        if self._run_callback is None:
-            LOGGER.error("Monitor callback is not configured")
-            return
-        self._inflight.add(inflight_key)
-        try:
-            await self._run_callback(monitor, context)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            LOGGER.exception("Monitor %s callback failed", monitor["id"])
-            if attempt < 2 and self._running:
-                await asyncio.sleep(2 ** (attempt + 1))
-                try:
-                    self._trigger_queue.put_nowait(
-                        (monitor, context, run_key, attempt + 1)
-                    )
-                except asyncio.QueueFull:
-                    LOGGER.error(
-                        "Monitor retry queue is full; dropped %s", monitor["id"]
-                    )
-        else:
-            self.storage.mark_run(monitor["id"], run_key)
-        finally:
-            self._inflight.discard(inflight_key)
+        trigger_lock = self._trigger_locks.setdefault(inflight_key, asyncio.Lock())
+        async with trigger_lock:
+            # A second durable trigger for the same monitor/run key must wait for
+            # the first callback. Returning early here would make the worker
+            # delete an outbox item that was never delivered.
+            try:
+                monitor = self.storage.get_monitor(monitor["id"])
+            except KeyError:
+                return
+            if not monitor["enabled"] or self._in_cooldown(monitor, run_key):
+                return
+            if self._run_callback is None:
+                raise RuntimeError("Monitor callback is not configured")
+            self._inflight.add(inflight_key)
+            try:
+                await self._run_callback(monitor, context)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if propagate_failure:
+                    raise
+                LOGGER.exception("Monitor %s callback failed", monitor["id"])
+            else:
+                self.storage.mark_run(monitor["id"], run_key)
+            finally:
+                self._inflight.discard(inflight_key)
 
     def _in_cooldown(self, monitor: dict[str, Any], run_key: str) -> bool:
         last_run = self.storage.last_run(monitor["id"], run_key)

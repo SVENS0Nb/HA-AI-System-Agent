@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
@@ -13,9 +15,22 @@ from .entity_control import (
     validate_controllable_entity_id,
 )
 from .ha_client import HomeAssistantReadClient
+from .monitoring.query import MonitoringQuery
 from .monitors import MonitorService
 from .redaction import redact_data, redact_text
 from .storage import Storage
+
+
+_SENSITIVE_HEALTH_MEMORY = re.compile(
+    r"\b(?:diagnos(?:e|is|ed)|krankheit(?:en)?|erkrankung(?:en)?|"
+    r"medikament(?:e|en)?|medication|prescription|rezept|allerg(?:ie|ies|isch)|"
+    r"blutdruck|blood\s+pressure|blutzucker|blood\s+sugar|therap(?:ie|y)|"
+    r"symptom(?:e|s)?|patient(?:in)?|schwanger|pregnan(?:t|cy)|"
+    r"gesundheit|health|medizin(?:isch)?|medical|arzt|ärztin|doctor|hospital|"
+    r"klinik|operation|surgery|infection|hiv|aids|psych(?:isch|ological)?|"
+    r"depression|diabetes|krebs|cancer)\b",
+    re.IGNORECASE,
+)
 
 
 def _object(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -35,6 +50,7 @@ def _tool(
     mutation: bool = False,
     learning: bool = False,
     control: bool = False,
+    monitoring: bool = False,
     strict: bool = True,
 ) -> dict[str, Any]:
     result = {
@@ -47,6 +63,7 @@ def _tool(
     result["_mutation"] = mutation
     result["_learning"] = learning
     result["_control"] = control
+    result["_monitoring"] = monitoring
     return result
 
 
@@ -155,7 +172,7 @@ TOOL_DEFINITIONS = [
     ),
     _tool(
         "remember_user_note",
-        "Remember an important exact statement from the current authenticated user's message. Evidence must be an exact excerpt of that message; never use logs, config, events, tool results, or assistant text.",
+        "Remember a non-sensitive important exact statement from the current authenticated user's message. Never store health data. Evidence must be an exact excerpt of that message; never use logs, config, events, tool results, or assistant text.",
         _object(
             {
                 "evidence": {"type": "string", "minLength": 8, "maxLength": 1000},
@@ -198,6 +215,157 @@ TOOL_DEFINITIONS = [
         "Read the locally learned behavior baseline and recent anomaly events for one exact entity ID.",
         _object({"entity_id": {"type": "string"}}, ["entity_id"]),
         learning=True,
+    ),
+    _tool(
+        "list_incidents",
+        "List explainable incidents from the local deterministic monitoring pipeline. This is read-only.",
+        _object(
+            {
+                "status": {
+                    "type": ["string", "null"],
+                    "enum": [
+                        "DETECTED",
+                        "INVESTIGATING",
+                        "CONFIRMED",
+                        "ACKNOWLEDGED",
+                        "RESOLVED",
+                        "CLOSED",
+                        "SUPPRESSED",
+                        "FALSE_POSITIVE",
+                        "EXPECTED_BEHAVIOR",
+                        None,
+                    ],
+                    "description": "Exact incident status or null for all statuses.",
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
+            ["status", "limit"],
+        ),
+        monitoring=True,
+    ),
+    _tool(
+        "get_incident",
+        "Read one explainable local incident including evidence and related entities.",
+        _object({"incident_id": {"type": "string"}}, ["incident_id"]),
+        monitoring=True,
+    ),
+    _tool(
+        "get_entity_profile",
+        "Read the local semantic entity profile and its learned global baseline.",
+        _object({"entity_id": {"type": "string"}}, ["entity_id"]),
+        monitoring=True,
+    ),
+    _tool(
+        "get_monitoring_health",
+        "Read component health and counters of the local monitoring pipeline.",
+        _object({}, []),
+        monitoring=True,
+    ),
+    _tool(
+        "list_anomalies",
+        "List recent local detector results with evidence. This is read-only.",
+        _object(
+            {"limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+            ["limit"],
+        ),
+        monitoring=True,
+    ),
+    _tool(
+        "list_dependencies",
+        "List dependency and expected-effect graph edges for one entity or the system. This is read-only.",
+        _object(
+            {
+                "entity_id": {"type": ["string", "null"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            ["entity_id", "limit"],
+        ),
+        monitoring=True,
+    ),
+    _tool(
+        "list_operating_cycles",
+        "List learned operating cycles, optionally for one entity. This is read-only.",
+        _object(
+            {
+                "entity_id": {"type": ["string", "null"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
+            ["entity_id", "limit"],
+        ),
+        monitoring=True,
+    ),
+    _tool(
+        "list_monitoring_summaries",
+        "List deterministic hourly, daily or weekly monitoring summaries. This is read-only.",
+        _object(
+            {
+                "period": {
+                    "type": "string",
+                    "enum": ["hourly", "daily", "weekly"],
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 30},
+            },
+            ["period", "limit"],
+        ),
+        monitoring=True,
+    ),
+    _tool(
+        "record_incident_feedback",
+        "Propose authenticated user feedback for one incident. Feedback changes only the internal incident lifecycle, never Home Assistant, and requires a separate BESTÄTIGEN code.",
+        _object(
+            {
+                "incident_id": {"type": "string"},
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "RELEVANT",
+                        "UNIMPORTANT",
+                        "EXPECTED_BEHAVIOR",
+                        "FALSE_POSITIVE",
+                        "PROBLEM_RESOLVED",
+                        "REMIND_LATER",
+                        "SUPPRESS_SIMILAR",
+                    ],
+                },
+                "comment": {"type": "string", "maxLength": 2000},
+                "remind_after_seconds": {
+                    "type": ["integer", "null"],
+                    "minimum": 60,
+                    "maximum": 604800,
+                },
+                "request_evidence": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 1000,
+                },
+            },
+            [
+                "incident_id",
+                "kind",
+                "comment",
+                "remind_after_seconds",
+                "request_evidence",
+            ],
+        ),
+        mutation=True,
+        monitoring=True,
+    ),
+    _tool(
+        "acknowledge_incident",
+        "Propose acknowledging one internal incident. Requires a separate BESTÄTIGEN code and never changes Home Assistant.",
+        _object(
+            {
+                "incident_id": {"type": "string"},
+                "request_evidence": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 1000,
+                },
+            },
+            ["incident_id", "request_evidence"],
+        ),
+        mutation=True,
+        monitoring=True,
     ),
     _tool(
         "control_entity",
@@ -345,6 +513,7 @@ class ToolRegistry:
         learning_enabled: bool = True,
         entity_control_enabled: bool = False,
         controllable_entities: frozenset[str] = frozenset(),
+        monitoring: MonitoringQuery | None = None,
     ) -> None:
         self.ha = ha
         self.config_reader = config_reader
@@ -354,6 +523,7 @@ class ToolRegistry:
         self.learning_enabled = learning_enabled
         self.entity_control_enabled = entity_control_enabled
         self.controllable_entities = controllable_entities
+        self.monitoring = monitoring
 
     def definitions(self, allow_monitor_changes: bool) -> list[dict[str, Any]]:
         definitions = []
@@ -361,6 +531,8 @@ class ToolRegistry:
             if item.get("_learning") and not self.learning_enabled:
                 continue
             if item.get("_control") and not self.entity_control_enabled:
+                continue
+            if item.get("_monitoring") and self.monitoring is None:
                 continue
             if item.get("_mutation") and not allow_monitor_changes:
                 continue
@@ -385,7 +557,13 @@ class ToolRegistry:
             raise PermissionError(
                 "Persistente Änderungen sind in proaktiven oder event-getriggerten Läufen deaktiviert."
             )
-        if name in {"remember_user_note", "forget_user_note", "control_entity"}:
+        if name in {
+            "remember_user_note",
+            "forget_user_note",
+            "control_entity",
+            "record_incident_feedback",
+            "acknowledge_incident",
+        }:
             arguments = {
                 **arguments,
                 "trusted_user_message": trusted_user_message,
@@ -403,9 +581,7 @@ class ToolRegistry:
             return pending["result"]
         handler = getattr(self, f"_apply_{pending['action']}", None)
         if handler is None:
-            self.storage.fail_action_execution(
-                sender, token, "Unknown pending action"
-            )
+            self.storage.fail_action_execution(sender, token, "Unknown pending action")
             raise KeyError("Unknown pending action")
         try:
             result = await handler(sender=sender, **pending["arguments"])
@@ -526,6 +702,8 @@ class ToolRegistry:
         trusted_user_message: str | None,
     ) -> Any:
         exact_evidence = self._verify_user_evidence(evidence, trusted_user_message)
+        if _SENSITIVE_HEALTH_MEMORY.search(exact_evidence):
+            raise PermissionError("Gesundheitsdaten dürfen nicht gespeichert werden.")
         return self.storage.add_memory(
             owner=sender,
             content=redact_text(exact_evidence),
@@ -567,6 +745,19 @@ class ToolRegistry:
     async def _tool_get_entity_behavior(self, *, sender: str, entity_id: str) -> Any:
         del sender
         behavior = self.storage.entity_behavior(entity_id)
+        if behavior is None and self.monitoring is not None:
+            try:
+                monitored = await asyncio.to_thread(
+                    self.monitoring.get_entity_profile, entity_id
+                )
+            except KeyError:
+                monitored = None
+            if monitored is not None:
+                behavior = {
+                    "source": "intelligent_monitoring",
+                    "profile": monitored.get("profile"),
+                    "global_baseline": monitored.get("global_baseline"),
+                }
         return {
             "learned": behavior is not None,
             "baseline": behavior,
@@ -574,6 +765,151 @@ class ToolRegistry:
                 entity_id=entity_id, limit=20
             ),
         }
+
+    async def _tool_list_incidents(
+        self, *, sender: str, status: str | None, limit: int
+    ) -> Any:
+        del sender
+        monitoring = self._require_monitoring()
+        return await asyncio.to_thread(
+            monitoring.list_incidents, status=status, limit=limit
+        )
+
+    async def _tool_get_incident(self, *, sender: str, incident_id: str) -> Any:
+        del sender
+        monitoring = self._require_monitoring()
+        return await asyncio.to_thread(monitoring.get_incident, incident_id)
+
+    async def _tool_get_entity_profile(self, *, sender: str, entity_id: str) -> Any:
+        del sender
+        monitoring = self._require_monitoring()
+        return await asyncio.to_thread(monitoring.get_entity_profile, entity_id)
+
+    async def _tool_get_monitoring_health(self, *, sender: str) -> Any:
+        del sender
+        monitoring = self._require_monitoring()
+        return monitoring.monitoring_health()
+
+    async def _tool_list_anomalies(self, *, sender: str, limit: int) -> Any:
+        del sender
+        return await asyncio.to_thread(self._require_monitoring().list_anomalies, limit)
+
+    async def _tool_list_dependencies(
+        self, *, sender: str, entity_id: str | None, limit: int
+    ) -> Any:
+        del sender
+        return await asyncio.to_thread(
+            self._require_monitoring().list_dependencies,
+            entity_id=entity_id,
+            limit=limit,
+        )
+
+    async def _tool_list_operating_cycles(
+        self, *, sender: str, entity_id: str | None, limit: int
+    ) -> Any:
+        del sender
+        return await asyncio.to_thread(
+            self._require_monitoring().list_operating_cycles,
+            entity_id=entity_id,
+            limit=limit,
+        )
+
+    async def _tool_list_monitoring_summaries(
+        self, *, sender: str, period: str, limit: int
+    ) -> Any:
+        del sender
+        return await asyncio.to_thread(
+            self._require_monitoring().list_summaries,
+            period=period,
+            limit=limit,
+        )
+
+    async def _tool_record_incident_feedback(
+        self,
+        *,
+        sender: str,
+        incident_id: str,
+        kind: str,
+        comment: str,
+        remind_after_seconds: int | None,
+        request_evidence: str,
+        trusted_user_message: str | None,
+    ) -> Any:
+        self._verify_trusted_excerpt(
+            request_evidence,
+            trusted_user_message,
+            minimum=3,
+            error="Das Incident-Feedback muss aus der aktuellen Signal-Nachricht stammen.",
+        )
+        self._require_monitoring().get_incident(incident_id)
+        if kind == "REMIND_LATER" and remind_after_seconds is None:
+            raise ValueError("Für REMIND_LATER ist eine Erinnerungszeit erforderlich.")
+        return self._propose(
+            sender,
+            "record_incident_feedback",
+            {
+                "incident_id": incident_id,
+                "kind": kind,
+                "comment": comment,
+                "remind_after_seconds": remind_after_seconds,
+            },
+        )
+
+    async def _apply_record_incident_feedback(
+        self,
+        *,
+        sender: str,
+        incident_id: str,
+        kind: str,
+        comment: str,
+        remind_after_seconds: int | None,
+    ) -> Any:
+        context: dict[str, object] = {}
+        if remind_after_seconds is not None:
+            context["remind_at"] = (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=max(60, min(604800, remind_after_seconds)))
+            ).isoformat()
+        return await asyncio.to_thread(
+            self._require_monitoring().record_feedback,
+            incident_id,
+            kind,
+            comment=comment,
+            source=f"signal:{sender}",
+            context=context,
+        )
+
+    async def _tool_acknowledge_incident(
+        self,
+        *,
+        sender: str,
+        incident_id: str,
+        request_evidence: str,
+        trusted_user_message: str | None,
+    ) -> Any:
+        self._verify_trusted_excerpt(
+            request_evidence,
+            trusted_user_message,
+            minimum=3,
+            error="Die Bestätigung muss aus der aktuellen Signal-Nachricht stammen.",
+        )
+        self._require_monitoring().get_incident(incident_id)
+        return self._propose(
+            sender, "acknowledge_incident", {"incident_id": incident_id}
+        )
+
+    async def _apply_acknowledge_incident(
+        self, *, sender: str, incident_id: str
+    ) -> Any:
+        del sender
+        return await asyncio.to_thread(
+            self._require_monitoring().acknowledge_incident, incident_id
+        )
+
+    def _require_monitoring(self) -> MonitoringQuery:
+        if self.monitoring is None:
+            raise RuntimeError("Intelligente Überwachung ist nicht verfügbar.")
+        return self.monitoring
 
     async def _tool_control_entity(
         self,
@@ -605,12 +941,27 @@ class ToolRegistry:
                 "mode": mode,
             },
         )
+        planned_action = f"{command['domain']}.{command['service']}"
+        planned_data = json.dumps(
+            command["service_data"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         return {
             **proposal,
             "entity_id": entity_id,
             "current_state": state.get("state"),
-            "planned_action": f"{command['domain']}.{command['service']}",
+            "planned_action": planned_action,
             "planned_data": command["service_data"],
+            "_confirmation_notice": (
+                "Geräteaktion zur Bestätigung:\n"
+                f"Entity: {entity_id}\n"
+                f"Dienst: {planned_action}\n"
+                f"Parameter: {planned_data}\n"
+                "Zur Ausführung exakt senden: "
+                f"BESTÄTIGEN {proposal['confirmation_token']}"
+            ),
         }
 
     async def _apply_control_entity(

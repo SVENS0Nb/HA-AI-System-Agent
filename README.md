@@ -35,6 +35,17 @@ flowchart LR
 - Monitore auflisten, deaktivieren, aktivieren und löschen
 - Wichtige Aussagen des jeweiligen Signal-Nutzers in einer begrenzten lokalen Wissensbasis behalten
 - Pro Entity lokale Verhaltens-Baselines bilden und auffällige Werte, häufige Zustandswechsel oder anhaltende Ausfälle melden
+- Home-Assistant-Ereignisse validieren, deduplizieren und in einer begrenzten lokalen Queue verarbeiten
+- Semantische Entity-Profile aus Entity-, Device- und Area-Registry mit Herkunft und Konfidenz aufbauen
+- Kontextbezogene Baselines nach Saison, Wochentag und Tageszeit sowie robuste Z-/MAD-Abweichungen berechnen
+- Verfügbarkeit, ausbleibende Updates und Zustandsfrequenz als nachvollziehbare Detektor-Evidenz erkennen
+- Read-only Automationen zu Abhängigkeiten und erwarteten Wirkungen mit Herkunft/Konfidenz auswerten
+- Konfigurierbare Zustandsautomaten, Betriebszyklen und Aktuator-Sensor-Wirkungen überwachen
+- Geschwärzte Logmeldungen lokal zu Templates clustern und ungewöhnliche Häufungen erkennen
+- Zusammenhängende Befunde zu priorisierten Incidents gruppieren und bei Recovery automatisch auflösen
+- Incidents strukturiert interpretieren, dedupliziert über Signal melden und mit Feedback/Entwarnung verwalten
+- Tages-/Wochenzusammenfassungen, Admin-Ansichten und einen aktionsfreien Replay-Modus bereitstellen
+- Komponenten-Health, Readiness und Prometheus-Metriken über die Admin-Oberfläche bereitstellen
 - Optionale Geräte-/Entity-Steuerung mit fester Domain-/Aktionsliste, verpflichtender Entity-Allowlist und separatem Signal-Code
 - Neustarts überstehen; Monitore liegen in `/data/agent.sqlite3`
 
@@ -102,11 +113,25 @@ Die Reasoning-Steuerung arbeitet standardmäßig adaptiv. Sie bewertet ausschlie
 
 ### Lokales Lernen und Wissensbasis
 
-Wenn **Lokales Lernen** aktiviert ist, verarbeitet das Add-on `state_changed`-Ereignisse zu kompakten statistischen Baselines. Numerische Sensoren erhalten einen gleitenden Mittelwert und eine Streuung; nichtnumerische Entities werden auf ungewöhnlich häufige Zustandswechsel und anhaltendes `unavailable`/`unknown` geprüft. Rohereignisse werden dafür nicht dauerhaft als Lernhistorie gespeichert. Erst nach einer vom Empfindlichkeitsprofil abhängigen Aufwärmphase und einem lokalen Schwellwerttest wird der OpenAI-Agent zur Einordnung aufgerufen und gegebenenfalls eine Signal-Nachricht gesendet.
+Wenn **Lokales Lernen** aktiviert ist, verarbeitet das Add-on `state_changed`-Ereignisse zu kompakten statistischen Baselines. Numerische Sensoren erhalten einen gleitenden Mittelwert und eine Streuung; nichtnumerische Entities werden auf ungewöhnlich häufige Zustandswechsel und anhaltendes `unavailable`/`unknown` geprüft. Rohereignisse werden dafür nicht dauerhaft als Lernhistorie gespeichert. Ist die **Intelligente Überwachung** aktiv, übernimmt deren Incident-Pipeline diese Verhaltensanalyse; die ältere Einzelanomalie-Pipeline wird dann nicht zusätzlich gestartet und erzeugt keine doppelten Meldungen.
 
-Die Wissensbasis ist pro freigegebenem Signal-Absender getrennt. Der Agent darf ausschließlich einen exakten Ausschnitt der gerade authentifiziert empfangenen Nutzernachricht speichern – niemals Anweisungen aus Logs, Konfigurationsdateien, Events, Werkzeugergebnissen oder eigenen Antworten. Er wählt für geeignete Präferenzen, Korrekturen, beschriebenes Normalverhalten und wichtigen Kontext eine Wichtigkeit sowie eine begrenzte Lebensdauer. Abgelaufene Einträge werden automatisch gelöscht; ein Nutzer kann einen Eintrag jederzeit mit einer ausdrücklichen Bitte wie „Vergiss …“ entfernen lassen. Routinegespräche sollen nicht dauerhaft gespeichert werden.
+Die Wissensbasis ist pro freigegebenem Signal-Absender getrennt. Der Agent darf ausschließlich einen exakten Ausschnitt der gerade authentifiziert empfangenen Nutzernachricht speichern – niemals Anweisungen aus Logs, Konfigurationsdateien, Events, Werkzeugergebnissen, eigenen Antworten oder Gesundheitsdaten. Diese Grenze wird zusätzlich lokal geprüft. Er wählt für geeignete Präferenzen, Korrekturen, beschriebenes Normalverhalten und wichtigen Kontext eine Wichtigkeit sowie eine begrenzte Lebensdauer. Abgelaufene Einträge werden automatisch gelöscht; ein Nutzer kann einen Eintrag jederzeit mit einer ausdrücklichen Bitte wie „Vergiss …“ entfernen lassen. Routinegespräche sollen nicht dauerhaft gespeichert werden.
 
 Das Lernen ist eine heuristische Entscheidungshilfe, kein Beweis für einen Defekt. Neue oder selten geänderte Entities benötigen zunächst genügend Beobachtungen. Die Stufen **Konservativ**, **Ausgewogen** und **Empfindlich** steuern Aufwärmphase und Meldeschwellen; bei Fehlalarmen sollte zunächst eine konservativere Stufe gewählt werden.
+
+### Intelligente Überwachung und Incidents
+
+Die zusätzliche **Intelligente Überwachung** verarbeitet den reconnect-fähigen Home-Assistant-Eventstream in einer begrenzten Pipeline. Regelmäßige aktuelle Zustands-Snapshots gleichen Stream-Unterbrechungen und kontrolliert verworfene Normalereignisse ab. Die Pipeline normalisiert und dedupliziert Ereignisse, reichert Entities mit Registry-Metadaten an, berechnet Rolling Features und vergleicht Messwerte erst nach einer konfigurierbaren Aufwärmphase mit globalen und kontextbezogenen Baselines. Bereits beim Start aktive Sicherheitsalarme werden sofort ausgewertet. Verfügbarkeitsbefunde benötigen standardmäßig 15 Minuten Persistenz; ausbleibende Updates werden erst geprüft, wenn ein typisches Intervall gelernt wurde.
+
+Unabhängige Detektoren liefern strukturierte Evidenz mit Messwert, Referenz, Stichprobenzahl, Schwelle, Score und Konfidenz. Der Incident Manager gruppiert gemeinsame Integrations-, Geräte-, Bereichs- oder Korrelationsfehler, berechnet eine mehrdimensionale Kritikalität und löst Verfügbarkeits-Incidents nach Recovery wieder auf. Diese Entscheidungen erfolgen vollständig lokal und deterministisch; ein LLM wird nicht pro Zustandsänderung aufgerufen.
+
+Zusätzlich analysiert das System read-only Automationen und Packages zu einem gerichteten Abhängigkeitsgraphen, prüft freigegebene Zustandsautomaten, lernt robuste Betriebszyklusdauern, kontrolliert erwartete Aktuator-Sensor-Wirkungen und clustert nur begrenzte, geschwärzte Core-Logausschnitte. Neue oder stark zunehmende Logcluster werden wie andere Befunde in die Incident-Engine geleitet.
+
+Materiale Incidents erhalten optional eine strikt schema-validierte OpenAI-Analyse aus einem begrenzten relevanten Kontext. Bei API-, Refusal- oder Validierungsfehlern bleibt eine deterministische lokale Erklärung und Benachrichtigung verfügbar. Proaktive Signal-Meldungen werden je Empfänger dauerhaft dedupliziert, nach Fehlern wiederholt, bei Verschlechterung eskaliert, nach Cooldown erneut gesendet und optional automatisch entwarnt. Ruhezeiten, dringende Ausnahmen und Wartungsmodus sind konfigurierbar.
+
+Im Signal-Chat kann der Agent Incidents, Anomalien, Profile/Baselines, Abhängigkeiten, Betriebszyklen, Zusammenfassungen und Health abfragen. Feedback und Bestätigung eines Incidents benötigen – wie andere interne Mutationen – exakte Evidenz aus der aktuellen Signal-Nachricht und einen separaten `BESTÄTIGEN`-Code. Geschützte Sicherheitsbefunde lassen sich nicht automatisch wegtrainieren. Die Admin-Oberfläche bietet dieselben Ansichten und Feedbackwege; JSONL-Replay testet Detektoren ohne live Home Assistant oder Aktionszugriff.
+
+Die Admin-Oberfläche bietet `/api/health` und `/metrics`; minimale Supervisor-Probes liegen unter `/health/live` und `/health/ready`. Architektur, Datenmodell und Detektoren sind im Verzeichnis [`docs`](./docs) dokumentiert.
 
 ### Optionale Geräte- und Entity-Steuerung
 
@@ -135,6 +160,23 @@ Auch eine erlaubte Aktion wird nur vorgeschlagen. Sie muss aus dem exakten Wortl
 | `anomaly_sensitivity` | `conservative`, `balanced` oder `sensitive` für Aufwärmphase und Auffälligkeitsschwellen |
 | `memory_retention_days` | Globale maximale Lebensdauer von Erinnerungen und Auffälligkeitsereignissen |
 | `max_memories_per_sender` | Mengenlimit der getrennten Wissensbasis je Signal-Absender |
+| `intelligent_monitoring_enabled` | Aktiviert die lokale Event-, Anomalie- und Incident-Pipeline; standardmäßig `true` |
+| `monitoring_event_retention_days` | Aufbewahrung normalisierter Ereignisse; Standard 7 Tage |
+| `monitoring_minimum_baseline_samples` | Minimale Beobachtungen je Kontext vor statistischer Erkennung; Standard 20 |
+| `monitoring_unavailable_grace_period_seconds` | Karenzzeit für `unavailable`/`unknown`; Standard 900 Sekunden |
+| `monitoring_incident_grouping_window_seconds` | Zeitfenster zum Zusammenführen zusammenhängender Evidenz; Standard 120 Sekunden |
+| `monitoring_notification_minimum_priority` | Prioritätsgrenze für proaktive Signal-Incidents; Standard 50 Prozent |
+| `monitoring_update_timeout_multiplier` | Faktor auf das gelernte Update-Intervall; Standard 3 |
+| `monitoring_llm_analysis_enabled` | Aktiviert gezielte schema-validierte Incident-Interpretation; lokale Erkennung bleibt unabhängig |
+| `monitoring_notifications_enabled` | Aktiviert proaktive Incident-Meldungen über Signal |
+| `monitoring_notify_on_resolve` | Sendet automatische Entwarnungen |
+| `monitoring_daily_summaries_enabled` | Erzeugt Stunden-, Tages- und Wochenzusammenfassungen |
+| `monitoring_log_analysis_enabled` | Aktiviert lokales, begrenztes und geschwärztes Log-Clustering |
+| `monitoring_maintenance_mode` | Pausiert Incident-Meldungen während geplanter Arbeiten |
+| `monitoring_vacation_mode` | Bevorzugt Security-Incidents während der Ruhezeit |
+| `monitoring_quiet_hours_start` / `_end` | Lokale Ruhezeit; dringende Sicherheitsbefunde dürfen sie durchbrechen |
+| `monitoring_notification_cooldown_seconds` | Früheste Wiederholungsfrist eines weiter aktiven Incidents |
+| `monitoring_context_max_chars` | Harte Obergrenze des redigierten Incident-Kontexts für OpenAI |
 | `entity_control_enabled` | Aktiviert die bestätigungspflichtige, fest begrenzte Geräte-/Entity-Steuerung; standardmäßig `false` |
 | `controllable_entities` | Explizite Liste erlaubter Entity-IDs; bei aktiver Steuerung ist mindestens ein Eintrag erforderlich, leer erlaubt nichts |
 | `allow_sensitive_config` | Hebt den Standardschutz für Secrets/Auth-Dateien auf; nicht empfohlen |
@@ -189,7 +231,9 @@ Home Assistant bietet Add-ons derzeit keinen fein gescopten Nur-Lese-Token. Das 
 - Die integrierte Signal-Bridge besitzt keinen veröffentlichten Netzwerk-Port; QR-Code und Kopplung laufen nur über die Admin-Oberfläche.
 - Signal-Eingang und -Ausgang sind auf `allowed_senders` sowie optional die eindeutig erkannte eigene „Notiz an mich“ begrenzt; Monitore gehören dem Ersteller.
 - Inhalte aus Logs, Konfigurationen und Events werden als nicht vertrauenswürdige Daten behandelt und vor Modellaufrufen lokal auf typische Secrets geprüft.
-- Dauerhafte Nutzererinnerungen müssen wortgleich aus der aktuellen, freigegebenen Signal-Nachricht stammen und sind nach Absender getrennt, mengenbegrenzt und mit einem Ablaufdatum versehen.
+- Der intelligente Monitoring-Pfad validiert IDs und Zeitstempel, begrenzt Tiefe, Anzahl und Stringlängen und speichert nur geschwärzte Ereignisobjekte mit kurzer Retention.
+- Detektoren und Incident Manager besitzen weder Signal-/OpenAI-Zugriff noch eine Referenz auf die bestätigte Entity-Steuerung.
+- Dauerhafte Nutzererinnerungen müssen wortgleich aus der aktuellen, freigegebenen Signal-Nachricht stammen, dürfen keine Gesundheitsdaten enthalten und sind nach Absender getrennt, mengenbegrenzt und mit einem Ablaufdatum versehen.
 - Dauerhafte Monitoränderungen benötigen eine vom Modell unabhängige, exakt passende Signal-Bestätigung und laufen nie aus proaktiven Agentläufen heraus.
 - Geräteaktionen sind standardmäßig deaktiviert, immer auf eine explizite Entity-ID-Freigabeliste begrenzt, müssen wortgleich aus der aktuellen Nutzernachricht hervorgehen und benötigen ebenfalls eine sendergebundene, zehn Minuten gültige Bestätigung.
 - Die Ausführung validiert Domain, Aktion, Entity, Wert und Modus erneut. Allgemeine Dienste und Konfigurations-/System-Domains sind nicht erreichbar.

@@ -70,6 +70,20 @@ class Storage:
                     PRIMARY KEY(monitor_id, run_key),
                     FOREIGN KEY(monitor_id) REFERENCES monitors(id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS monitor_triggers (
+                    id TEXT PRIMARY KEY,
+                    monitor_id TEXT NOT NULL,
+                    context_json TEXT NOT NULL,
+                    run_key TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('pending','failed')),
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(monitor_id) REFERENCES monitors(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_monitor_triggers_pending
+                    ON monitor_triggers(status, created_at);
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sender TEXT NOT NULL,
@@ -255,6 +269,65 @@ class Storage:
                 (monitor_id, run_key),
             ).fetchone()
         return str(row[0]) if row else None
+
+    def add_monitor_trigger(
+        self, monitor_id: str, context: dict[str, Any], run_key: str
+    ) -> dict[str, Any]:
+        trigger_id = uuid.uuid4().hex
+        run_key = self._bounded_text(run_key, "run_key", 255)
+        context_json = self._json_payload(context, "monitor context", 128_000)
+        now = utc_now()
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT INTO monitor_triggers("
+                "id,monitor_id,context_json,run_key,status,attempts,created_at,updated_at"
+                ") VALUES(?,?,?,?,'pending',0,?,?)",
+                (trigger_id, monitor_id, context_json, run_key, now, now),
+            )
+        return {
+            "id": trigger_id,
+            "monitor_id": monitor_id,
+            "context": context,
+            "run_key": run_key,
+            "status": "pending",
+            "attempts": 0,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def list_pending_monitor_triggers(self, limit: int = 500) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 5000))
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM monitor_triggers WHERE status='pending' "
+                "ORDER BY created_at LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._monitor_trigger_from_row(row) for row in rows]
+
+    def update_monitor_trigger_attempt(
+        self, trigger_id: str, attempts: int, error: str
+    ) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE monitor_triggers SET attempts=?,last_error=?,updated_at=? "
+                "WHERE id=? AND status='pending'",
+                (max(0, attempts), redact_error(error), utc_now(), trigger_id),
+            )
+
+    def complete_monitor_trigger(self, trigger_id: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "DELETE FROM monitor_triggers WHERE id=?", (trigger_id,)
+            )
+
+    def fail_monitor_trigger(self, trigger_id: str, error: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE monitor_triggers SET status='failed',last_error=?,updated_at=? "
+                "WHERE id=? AND status='pending'",
+                (redact_error(error), utc_now(), trigger_id),
+            )
 
     def add_message(self, sender: str, role: str, content: str) -> None:
         if role not in {"user", "assistant"}:
@@ -499,6 +572,7 @@ class Storage:
         entity_id = self._bounded_text(entity_id, "entity_id", 255)
         if kind not in {"numeric_outlier", "state_churn", "persistent_unavailable"}:
             raise ValueError("Unknown anomaly kind")
+        details_json = self._json_payload(details, "anomaly details", 8000)
         now = datetime.now(timezone.utc)
         with self._lock, self._connection:
             last = self._connection.execute(
@@ -520,7 +594,7 @@ class Storage:
                     anomaly_id,
                     entity_id,
                     kind,
-                    json.dumps(details, ensure_ascii=False, default=str)[:8000],
+                    details_json,
                     now.isoformat(),
                 ),
             )
@@ -579,9 +653,12 @@ class Storage:
         if not normalized:
             return []
         with self._lock, self._connection:
-            if self._connection.execute(
-                "SELECT 1 FROM anomaly_events WHERE id=?", (anomaly_id,)
-            ).fetchone() is None:
+            if (
+                self._connection.execute(
+                    "SELECT 1 FROM anomaly_events WHERE id=?", (anomaly_id,)
+                ).fetchone()
+                is None
+            ):
                 raise KeyError("Unknown anomaly")
             self._connection.executemany(
                 "INSERT OR IGNORE INTO anomaly_deliveries(anomaly_id,recipient,updated_at) "
@@ -595,14 +672,10 @@ class Storage:
             ).fetchall()
         allowed = set(normalized)
         return [
-            str(row["recipient"])
-            for row in rows
-            if str(row["recipient"]) in allowed
+            str(row["recipient"]) for row in rows if str(row["recipient"]) in allowed
         ]
 
-    def mark_anomaly_recipient_delivered(
-        self, anomaly_id: str, recipient: str
-    ) -> None:
+    def mark_anomaly_recipient_delivered(self, anomaly_id: str, recipient: str) -> None:
         now = utc_now()
         with self._lock, self._connection:
             cursor = self._connection.execute(
@@ -741,15 +814,14 @@ class Storage:
             "replayed": False,
         }
 
-    def complete_action_execution(
-        self, sender: str, token: str, result: Any
-    ) -> None:
+    def complete_action_execution(self, sender: str, token: str, result: Any) -> None:
+        result_json = self._json_payload(result, "action result", 120_000)
         with self._lock, self._connection:
             cursor = self._connection.execute(
                 "UPDATE action_executions SET status='succeeded',result_json=?,"
                 "error=NULL,updated_at=? WHERE token=? AND sender=? AND status='executing'",
                 (
-                    json.dumps(result, ensure_ascii=False, default=str)[:120_000],
+                    result_json,
                     utc_now(),
                     token,
                     sender,
@@ -801,13 +873,19 @@ class Storage:
         with self._lock, self._connection:
             # Preserve the seven-day dedupe window from releases that only
             # stored the digest, so an update cannot replay an old command.
-            if self._connection.execute(
-                "SELECT 1 FROM signal_messages WHERE digest=?", (digest,)
-            ).fetchone() is not None:
+            if (
+                self._connection.execute(
+                    "SELECT 1 FROM signal_messages WHERE digest=?", (digest,)
+                ).fetchone()
+                is not None
+            ):
                 return False
-            if self._connection.execute(
-                "SELECT 1 FROM signal_inbox WHERE digest=?", (digest,)
-            ).fetchone() is not None:
+            if (
+                self._connection.execute(
+                    "SELECT 1 FROM signal_inbox WHERE digest=?", (digest,)
+                ).fetchone()
+                is not None
+            ):
                 return False
             pending_count = int(
                 self._connection.execute(
@@ -909,6 +987,10 @@ class Storage:
                 "DELETE FROM entity_behavior WHERE last_observed_at < ?",
                 (anomaly_cutoff,),
             )
+            self._connection.execute(
+                "DELETE FROM monitor_triggers WHERE status='failed' AND updated_at < ?",
+                (message_cutoff,),
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -924,6 +1006,15 @@ class Storage:
         return value
 
     @staticmethod
+    def _json_payload(value: Any, name: str, maximum: int) -> str:
+        encoded = json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), default=str
+        )
+        if len(encoded.encode("utf-8")) > maximum:
+            raise ValueError(f"{name} exceeds {maximum} bytes")
+        return encoded
+
+    @staticmethod
     def _monitor_from_row(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "id": row["id"],
@@ -935,6 +1026,23 @@ class Storage:
             "enabled": bool(row["enabled"]),
             "last_run_at": row["last_run_at"],
             "created_at": row["created_at"],
+        }
+
+    @staticmethod
+    def _monitor_trigger_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        context = json.loads(row["context_json"])
+        if not isinstance(context, dict):
+            raise ValueError("Stored monitor trigger context is not an object")
+        return {
+            "id": row["id"],
+            "monitor_id": row["monitor_id"],
+            "context": context,
+            "run_key": row["run_key"],
+            "status": row["status"],
+            "attempts": int(row["attempts"]),
+            "last_error": row["last_error"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
         }
 
     @staticmethod

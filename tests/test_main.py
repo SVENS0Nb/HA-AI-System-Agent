@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from app.main import handle_signal_message, wait_for_change_or_stop
+from app.main import (
+    handle_signal_message,
+    is_quiet_hour,
+    is_urgent_incident,
+    wait_for_change_or_stop,
+)
 
 
 class FakeRegistry:
@@ -50,6 +58,26 @@ class MainMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply, "agent reply")
         self.assertEqual(registry.confirmed, [])
 
+    async def test_entity_confirmation_reports_actual_executed_service(self) -> None:
+        class EntityRegistry(FakeRegistry):
+            async def confirm_action(self, sender: str, token: str) -> dict[str, Any]:
+                self.confirmed.append((sender, token))
+                return {
+                    "accepted": True,
+                    "entity_id": "light.kitchen",
+                    "domain": "light",
+                    "service": "turn_on",
+                    "service_data": {"brightness_pct": 40},
+                }
+
+        registry = EntityRegistry()
+        reply = await handle_signal_message(  # type: ignore[arg-type]
+            "+49111", "BESTÄTIGEN A1B2C3D4", registry, FakeAgent()
+        )
+        self.assertIn("light.kitchen", reply)
+        self.assertIn("light.turn_on", reply)
+        self.assertIn('"brightness_pct":40', reply)
+
     async def test_cancel_is_deterministic(self) -> None:
         registry = FakeRegistry()
         agent = FakeAgent()
@@ -71,3 +99,25 @@ class MainMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await wait_for_change_or_stop(reload_event, stop_event), "stop"
         )
+
+    def test_quiet_hours_wrap_midnight_and_vacation_prioritizes_security(self) -> None:
+        settings = SimpleNamespace(
+            timezone="Europe/Berlin",
+            monitoring_quiet_hours_start="23:00",
+            monitoring_quiet_hours_end="07:00",
+        )
+        self.assertTrue(
+            is_quiet_hour(
+                settings,  # type: ignore[arg-type]
+                datetime(2026, 7, 17, 23, 30, tzinfo=ZoneInfo("Europe/Berlin")),
+            )
+        )
+        self.assertFalse(
+            is_quiet_hour(
+                settings,  # type: ignore[arg-type]
+                datetime(2026, 7, 17, 12, 0, tzinfo=ZoneInfo("Europe/Berlin")),
+            )
+        )
+        security = {"criticality": {"security": 2}}
+        self.assertFalse(is_urgent_incident(security))
+        self.assertTrue(is_urgent_incident(security, vacation_mode=True))

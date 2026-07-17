@@ -38,6 +38,24 @@ class Settings:
     anomaly_sensitivity: str
     memory_retention_days: int
     max_memories_per_sender: int
+    intelligent_monitoring_enabled: bool
+    monitoring_event_retention_days: int
+    monitoring_minimum_baseline_samples: int
+    monitoring_unavailable_grace_period_seconds: int
+    monitoring_incident_grouping_window_seconds: int
+    monitoring_notification_minimum_priority: int
+    monitoring_update_timeout_multiplier: int
+    monitoring_llm_analysis_enabled: bool
+    monitoring_notifications_enabled: bool
+    monitoring_notify_on_resolve: bool
+    monitoring_daily_summaries_enabled: bool
+    monitoring_log_analysis_enabled: bool
+    monitoring_maintenance_mode: bool
+    monitoring_vacation_mode: bool
+    monitoring_quiet_hours_start: str
+    monitoring_quiet_hours_end: str
+    monitoring_notification_cooldown_seconds: int
+    monitoring_context_max_chars: int
     entity_control_enabled: bool
     controllable_entities: frozenset[str]
     allow_sensitive_config: bool
@@ -101,6 +119,114 @@ class Settings:
             max_memories_per_sender=max(
                 10, min(1000, int(options.get("max_memories_per_sender", 200)))
             ),
+            intelligent_monitoring_enabled=cls._bool(
+                options.get("intelligent_monitoring_enabled", True),
+                "intelligent_monitoring_enabled",
+            ),
+            monitoring_event_retention_days=max(
+                1, min(90, int(options.get("monitoring_event_retention_days", 7)))
+            ),
+            monitoring_minimum_baseline_samples=max(
+                5,
+                min(
+                    500,
+                    int(options.get("monitoring_minimum_baseline_samples", 20)),
+                ),
+            ),
+            monitoring_unavailable_grace_period_seconds=max(
+                0,
+                min(
+                    86_400,
+                    int(
+                        options.get(
+                            "monitoring_unavailable_grace_period_seconds", 900
+                        )
+                    ),
+                ),
+            ),
+            monitoring_incident_grouping_window_seconds=max(
+                10,
+                min(
+                    3600,
+                    int(
+                        options.get(
+                            "monitoring_incident_grouping_window_seconds", 120
+                        )
+                    ),
+                ),
+            ),
+            monitoring_notification_minimum_priority=max(
+                0,
+                min(
+                    100,
+                    int(
+                        options.get(
+                            "monitoring_notification_minimum_priority", 50
+                        )
+                    ),
+                ),
+            ),
+            monitoring_update_timeout_multiplier=max(
+                2,
+                min(
+                    20,
+                    int(options.get("monitoring_update_timeout_multiplier", 3)),
+                ),
+            ),
+            monitoring_llm_analysis_enabled=cls._bool(
+                options.get("monitoring_llm_analysis_enabled", True),
+                "monitoring_llm_analysis_enabled",
+            ),
+            monitoring_notifications_enabled=cls._bool(
+                options.get("monitoring_notifications_enabled", True),
+                "monitoring_notifications_enabled",
+            ),
+            monitoring_notify_on_resolve=cls._bool(
+                options.get("monitoring_notify_on_resolve", True),
+                "monitoring_notify_on_resolve",
+            ),
+            monitoring_daily_summaries_enabled=cls._bool(
+                options.get("monitoring_daily_summaries_enabled", True),
+                "monitoring_daily_summaries_enabled",
+            ),
+            monitoring_log_analysis_enabled=cls._bool(
+                options.get("monitoring_log_analysis_enabled", True),
+                "monitoring_log_analysis_enabled",
+            ),
+            monitoring_maintenance_mode=cls._bool(
+                options.get("monitoring_maintenance_mode", False),
+                "monitoring_maintenance_mode",
+            ),
+            monitoring_vacation_mode=cls._bool(
+                options.get("monitoring_vacation_mode", False),
+                "monitoring_vacation_mode",
+            ),
+            monitoring_quiet_hours_start=cls._clock_time(
+                options.get("monitoring_quiet_hours_start", "23:00"),
+                "monitoring_quiet_hours_start",
+            ),
+            monitoring_quiet_hours_end=cls._clock_time(
+                options.get("monitoring_quiet_hours_end", "07:00"),
+                "monitoring_quiet_hours_end",
+            ),
+            monitoring_notification_cooldown_seconds=max(
+                300,
+                min(
+                    86_400,
+                    int(
+                        options.get(
+                            "monitoring_notification_cooldown_seconds", 3600
+                        )
+                    ),
+                ),
+            ),
+            monitoring_context_max_chars=max(
+                5_000,
+                min(
+                    100_000,
+                    int(options.get("monitoring_context_max_chars", 30_000)),
+                ),
+            ),
             entity_control_enabled=cls._bool(
                 options.get("entity_control_enabled", False),
                 "entity_control_enabled",
@@ -153,6 +279,14 @@ class Settings:
     def _bool(value: Any, name: str) -> bool:
         if not isinstance(value, bool):
             raise TypeError(f"{name} muss true oder false sein")
+        return value
+
+    @staticmethod
+    def _clock_time(value: Any, name: str) -> str:
+        if not isinstance(value, str) or not re.fullmatch(
+            r"(?:[01]\d|2[0-3]):[0-5]\d", value
+        ):
+            raise ValueError(f"{name} muss eine Uhrzeit im Format HH:MM sein")
         return value
 
     @property
@@ -313,6 +447,24 @@ class SettingsStore:
         "anomaly_sensitivity",
         "memory_retention_days",
         "max_memories_per_sender",
+        "intelligent_monitoring_enabled",
+        "monitoring_event_retention_days",
+        "monitoring_minimum_baseline_samples",
+        "monitoring_unavailable_grace_period_seconds",
+        "monitoring_incident_grouping_window_seconds",
+        "monitoring_notification_minimum_priority",
+        "monitoring_update_timeout_multiplier",
+        "monitoring_llm_analysis_enabled",
+        "monitoring_notifications_enabled",
+        "monitoring_notify_on_resolve",
+        "monitoring_daily_summaries_enabled",
+        "monitoring_log_analysis_enabled",
+        "monitoring_maintenance_mode",
+        "monitoring_vacation_mode",
+        "monitoring_quiet_hours_start",
+        "monitoring_quiet_hours_end",
+        "monitoring_notification_cooldown_seconds",
+        "monitoring_context_max_chars",
         "entity_control_enabled",
         "controllable_entities",
         "allow_sensitive_config",
@@ -341,13 +493,23 @@ class SettingsStore:
         "signal_account",
         "timezone",
         "anomaly_sensitivity",
+        "monitoring_quiet_hours_start",
+        "monitoring_quiet_hours_end",
     }
     BOOLEAN_FIELDS = {
         "allow_sensitive_config",
         "startup_message",
         "learning_enabled",
+        "intelligent_monitoring_enabled",
         "entity_control_enabled",
         "signal_self_chat_enabled",
+        "monitoring_llm_analysis_enabled",
+        "monitoring_notifications_enabled",
+        "monitoring_notify_on_resolve",
+        "monitoring_daily_summaries_enabled",
+        "monitoring_log_analysis_enabled",
+        "monitoring_maintenance_mode",
+        "monitoring_vacation_mode",
     }
     INTEGER_FIELDS = {
         "conversation_messages",
@@ -363,6 +525,14 @@ class SettingsStore:
         "reconcile_interval_seconds",
         "memory_retention_days",
         "max_memories_per_sender",
+        "monitoring_event_retention_days",
+        "monitoring_minimum_baseline_samples",
+        "monitoring_unavailable_grace_period_seconds",
+        "monitoring_incident_grouping_window_seconds",
+        "monitoring_notification_minimum_priority",
+        "monitoring_update_timeout_multiplier",
+        "monitoring_notification_cooldown_seconds",
+        "monitoring_context_max_chars",
     }
 
     def __init__(
@@ -416,6 +586,52 @@ class SettingsStore:
         result["memory_retention_days"] = int(values.get("memory_retention_days", 365))
         result["max_memories_per_sender"] = int(
             values.get("max_memories_per_sender", 200)
+        )
+        result["intelligent_monitoring_enabled"] = Settings._bool(
+            values.get("intelligent_monitoring_enabled", True),
+            "intelligent_monitoring_enabled",
+        )
+        result["monitoring_event_retention_days"] = int(
+            values.get("monitoring_event_retention_days", 7)
+        )
+        result["monitoring_minimum_baseline_samples"] = int(
+            values.get("monitoring_minimum_baseline_samples", 20)
+        )
+        result["monitoring_unavailable_grace_period_seconds"] = int(
+            values.get("monitoring_unavailable_grace_period_seconds", 900)
+        )
+        result["monitoring_incident_grouping_window_seconds"] = int(
+            values.get("monitoring_incident_grouping_window_seconds", 120)
+        )
+        result["monitoring_notification_minimum_priority"] = int(
+            values.get("monitoring_notification_minimum_priority", 50)
+        )
+        result["monitoring_update_timeout_multiplier"] = int(
+            values.get("monitoring_update_timeout_multiplier", 3)
+        )
+        for name, default in {
+            "monitoring_llm_analysis_enabled": True,
+            "monitoring_notifications_enabled": True,
+            "monitoring_notify_on_resolve": True,
+            "monitoring_daily_summaries_enabled": True,
+            "monitoring_log_analysis_enabled": True,
+            "monitoring_maintenance_mode": False,
+            "monitoring_vacation_mode": False,
+        }.items():
+            result[name] = Settings._bool(values.get(name, default), name)
+        result["monitoring_quiet_hours_start"] = Settings._clock_time(
+            values.get("monitoring_quiet_hours_start", "23:00"),
+            "monitoring_quiet_hours_start",
+        )
+        result["monitoring_quiet_hours_end"] = Settings._clock_time(
+            values.get("monitoring_quiet_hours_end", "07:00"),
+            "monitoring_quiet_hours_end",
+        )
+        result["monitoring_notification_cooldown_seconds"] = int(
+            values.get("monitoring_notification_cooldown_seconds", 3600)
+        )
+        result["monitoring_context_max_chars"] = int(
+            values.get("monitoring_context_max_chars", 30_000)
         )
         result["entity_control_enabled"] = Settings._bool(
             values.get("entity_control_enabled", False), "entity_control_enabled"

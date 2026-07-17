@@ -8,12 +8,23 @@ const fields = [
   'conversation_messages','message_retention_days','max_messages_per_sender',
   'max_monitors_per_sender','reconcile_interval_seconds','default_log_lines',
   'max_config_file_kb','startup_message','learning_enabled','anomaly_sensitivity',
-  'memory_retention_days','max_memories_per_sender','entity_control_enabled','allow_sensitive_config',
+  'memory_retention_days','max_memories_per_sender','intelligent_monitoring_enabled',
+  'monitoring_event_retention_days','monitoring_minimum_baseline_samples',
+  'monitoring_unavailable_grace_period_seconds','monitoring_incident_grouping_window_seconds',
+  'monitoring_notification_minimum_priority','monitoring_update_timeout_multiplier',
+  'monitoring_llm_analysis_enabled','monitoring_notifications_enabled',
+  'monitoring_notify_on_resolve','monitoring_daily_summaries_enabled',
+  'monitoring_log_analysis_enabled','monitoring_maintenance_mode',
+  'monitoring_vacation_mode',
+  'monitoring_quiet_hours_start','monitoring_quiet_hours_end',
+  'monitoring_notification_cooldown_seconds','monitoring_context_max_chars',
+  'entity_control_enabled','allow_sensitive_config',
   'clear_openai_api_key','clear_signal_api_token'
 ];
 let linkPolling=false;
 let pairingStarting=false;
 let lastPairStatus='idle';
+let selectedIncident=null;
 
 function toast(message,error=false) {
   const el=$('toast'); el.textContent=message; el.className=`show${error?' error':''}`;
@@ -45,6 +56,20 @@ function setLearningMode() {
 function setEntityControlMode() {
   $('controllable_entities').disabled=!$('entity_control_enabled').checked;
 }
+function setIntelligentMonitoringMode() {
+  const enabled=$('intelligent_monitoring_enabled').checked;
+  [
+    'monitoring_event_retention_days','monitoring_minimum_baseline_samples',
+    'monitoring_unavailable_grace_period_seconds','monitoring_incident_grouping_window_seconds',
+    'monitoring_notification_minimum_priority','monitoring_update_timeout_multiplier',
+    'monitoring_llm_analysis_enabled','monitoring_notifications_enabled',
+    'monitoring_notify_on_resolve','monitoring_daily_summaries_enabled',
+    'monitoring_log_analysis_enabled','monitoring_maintenance_mode',
+    'monitoring_vacation_mode',
+    'monitoring_quiet_hours_start','monitoring_quiet_hours_end',
+    'monitoring_notification_cooldown_seconds','monitoring_context_max_chars'
+  ].forEach(id=>{$(id).disabled=!enabled;});
+}
 async function loadTimezones(selected) {
   let zones=[];
   try { ({timezones:zones}=await request('api/timezones')); }
@@ -70,6 +95,7 @@ async function loadSettings() {
     $('signalTokenHint').textContent=s.signal_api_token_set?'Ein Token ist gespeichert. Leer lassen, um ihn beizubehalten.':'Optional; aktuell ist kein Token gespeichert.';
     setReasoningMode();
     setLearningMode();
+    setIntelligentMonitoringMode();
     setEntityControlMode();
     setSignalMode();
   } catch(e) { toast(e.message,true); }
@@ -81,6 +107,86 @@ async function loadStatus() {
     $('statusTitle').textContent=status.agent_running?'Agentprozess aktiv':'Konfiguration oder Laufzeit prüfen';
     $('statusMessages').replaceChildren(...status.messages.map(m=>{const li=document.createElement('li');li.textContent=m;return li;}));
   } catch(e) { toast(e.message,true); }
+}
+function textBlock(parent,label,value) {
+  const row=document.createElement('p');
+  const strong=document.createElement('strong'); strong.textContent=`${label}: `;
+  row.append(strong,document.createTextNode(value===null||value===undefined?'–':String(value)));
+  parent.append(row);
+}
+function renderHealth(health) {
+  const box=$('healthDetails'); box.replaceChildren();
+  textBlock(box,'Gesamtstatus',health.status);
+  const components=health.components||{};
+  Object.keys(components).sort().forEach(name=>textBlock(box,name,components[name].status));
+}
+function renderSummary(summaries) {
+  const box=$('summaryDetails'); box.replaceChildren();
+  if(!summaries.length) { const p=document.createElement('p'); p.textContent='Noch keine Tageszusammenfassung vorhanden.'; box.append(p); return; }
+  const item=summaries[0];
+  const p=document.createElement('p'); p.textContent=item.text||'Zusammenfassung ohne Text'; box.append(p);
+  textBlock(box,'Zeitraum',`${item.period_start} – ${item.period_end}`);
+}
+function renderIncidents(incidents) {
+  const list=$('incidentList'); list.replaceChildren();
+  if(!incidents.length) { const p=document.createElement('p'); p.textContent='Keine Incidents vorhanden.'; list.append(p); return; }
+  incidents.forEach(item=>{
+    const button=document.createElement('button'); button.type='button'; button.className='record';
+    const title=document.createElement('strong'); title.textContent=item.title||item.incident_id;
+    const meta=document.createElement('small');
+    meta.textContent=`${item.status} · ${Math.round(Number(item.priority_score||0)*100)} % · ${item.last_updated}`;
+    button.append(title,meta); button.addEventListener('click',()=>loadIncident(item.incident_id));
+    list.append(button);
+  });
+}
+async function loadIncident(incidentId) {
+  selectedIncident=incidentId;
+  try {
+    const result=await request(`api/incidents/${encodeURIComponent(incidentId)}`);
+    const item=result.incident; const box=$('incidentDetails'); box.replaceChildren();
+    const heading=document.createElement('h4'); heading.textContent=item.title||item.incident_id; box.append(heading);
+    textBlock(box,'Status',item.status); textBlock(box,'Priorität',`${Math.round(Number(item.priority_score||0)*100)} %`);
+    textBlock(box,'Entities',(item.affected_entities||[]).join(', '));
+    textBlock(box,'Anomalietypen',(item.anomaly_types||[]).join(', '));
+    const analysis=document.createElement('pre');
+    analysis.textContent=JSON.stringify(item.analysis||{analysis_status:item.analysis_status},null,2); box.append(analysis);
+    const controls=document.createElement('div'); controls.className='incident-controls';
+    const select=document.createElement('select');
+    [
+      ['RELEVANT','Relevant'],['UNIMPORTANT','Unwichtig'],['EXPECTED_BEHAVIOR','Erwartetes Verhalten'],
+      ['FALSE_POSITIVE','Fehlalarm'],['PROBLEM_RESOLVED','Problem behoben'],
+      ['REMIND_LATER','Später erinnern'],['SUPPRESS_SIMILAR','Ähnliche Situation unterdrücken']
+    ].forEach(([value,label])=>{const option=document.createElement('option');option.value=value;option.textContent=label;select.append(option);});
+    const feedback=document.createElement('button'); feedback.type='button'; feedback.textContent='Feedback speichern';
+    feedback.addEventListener('click',()=>incidentMutation(incidentId,'feedback',{kind:select.value}));
+    const acknowledge=document.createElement('button'); acknowledge.type='button'; acknowledge.className='secondary'; acknowledge.textContent='Bestätigen';
+    acknowledge.addEventListener('click',()=>incidentMutation(incidentId,'acknowledge'));
+    const resolve=document.createElement('button'); resolve.type='button'; resolve.className='secondary'; resolve.textContent='Als behoben markieren';
+    resolve.addEventListener('click',()=>incidentMutation(incidentId,'resolve'));
+    controls.append(select,feedback,acknowledge,resolve); box.append(controls);
+    if((result.feedback||[]).length) textBlock(box,'Letztes Feedback',result.feedback[0].kind);
+  } catch(e) { toast(e.message,true); }
+}
+async function incidentMutation(incidentId,action,body) {
+  try {
+    await request(`api/incidents/${encodeURIComponent(incidentId)}/${action}`,{
+      method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+      body:JSON.stringify(body||{})
+    });
+    toast('Incident wurde aktualisiert.'); await loadMonitoring(); await loadIncident(incidentId);
+  } catch(e) { toast(e.message,true); }
+}
+async function loadMonitoring() {
+  try {
+    const [incidents,health,summaries]=await Promise.all([
+      request('api/incidents?limit=50'),request('api/health'),request('api/summaries/daily?limit=1')
+    ]);
+    $('monitoringUnavailable').hidden=true;
+    renderIncidents(incidents.incidents||[]); renderHealth(health.health||{}); renderSummary(summaries.summaries||[]);
+    if(selectedIncident&&(incidents.incidents||[]).some(item=>item.incident_id===selectedIncident)) await loadIncident(selectedIncident);
+  } catch(_) {
+    $('monitoringUnavailable').hidden=false; $('incidentList').replaceChildren();
+  }
 }
 async function loadSignalStatus() {
   if($('signal_mode').value!=='integrated') return;
@@ -164,7 +270,9 @@ function payload() {
 $('signal_mode').addEventListener('change',setSignalMode);
 $('reasoning_mode').addEventListener('change',setReasoningMode);
 $('learning_enabled').addEventListener('change',setLearningMode);
+$('intelligent_monitoring_enabled').addEventListener('change',setIntelligentMonitoringMode);
 $('entity_control_enabled').addEventListener('change',setEntityControlMode);
+$('refreshMonitoring').addEventListener('click',loadMonitoring);
 $('signalConnect').addEventListener('click',async()=>{
   const button=$('signalConnect'); button.disabled=true;
   try {
@@ -215,6 +323,7 @@ document.querySelectorAll('.test').forEach(button=>button.addEventListener('clic
   catch(e) { toast(e.message,true); } finally { button.disabled=false; }
 }));
 
-loadSettings(); loadStatus();
+loadSettings(); loadStatus(); loadMonitoring();
 setInterval(loadStatus,5000);
 setInterval(loadSignalStatus,3000);
+setInterval(loadMonitoring,15000);

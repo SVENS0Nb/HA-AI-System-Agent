@@ -65,7 +65,9 @@ class StorageTests(unittest.TestCase):
             self.storage.get_pending_action("+49222", pending["token"])
         self.assertEqual(self.storage.cancel_pending_actions("+49111"), 1)
 
-    def test_action_execution_is_consumed_before_side_effect_and_replayable(self) -> None:
+    def test_action_execution_is_consumed_before_side_effect_and_replayable(
+        self,
+    ) -> None:
         pending = self.storage.create_pending_action(
             "+49111", "control_entity", {"entity_id": "light.kitchen"}
         )
@@ -79,6 +81,42 @@ class StorageTests(unittest.TestCase):
         replay = self.storage.begin_pending_action("+49111", pending["token"])
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["result"], {"accepted": True})
+
+    def test_oversized_json_is_rejected_instead_of_stored_truncated(self) -> None:
+        with self.assertRaisesRegex(ValueError, "anomaly details exceeds"):
+            self.storage.add_anomaly(
+                entity_id="sensor.temperature",
+                kind="numeric_outlier",
+                details={"payload": "x" * 9000},
+                cooldown_seconds=0,
+            )
+        self.assertEqual(self.storage.recent_anomalies(), [])
+
+        pending = self.storage.create_pending_action(
+            "+49111", "control_entity", {"entity_id": "light.kitchen"}
+        )
+        self.storage.begin_pending_action("+49111", pending["token"])
+        with self.assertRaisesRegex(ValueError, "action result exceeds"):
+            self.storage.complete_action_execution(
+                "+49111", pending["token"], {"payload": "x" * 120_001}
+            )
+
+    def test_monitor_triggers_are_durable_until_completed(self) -> None:
+        monitor = self.storage.add_monitor(
+            name="durable",
+            kind="event",
+            spec={"event_type": "alarm"},
+            task="notify",
+            recipient="+49111",
+        )
+        trigger = self.storage.add_monitor_trigger(
+            monitor["id"], {"event": "alarm"}, "default"
+        )
+        self.assertEqual(
+            self.storage.list_pending_monitor_triggers()[0]["id"], trigger["id"]
+        )
+        self.storage.complete_monitor_trigger(trigger["id"])
+        self.assertEqual(self.storage.list_pending_monitor_triggers(), [])
 
     def test_signal_inbox_survives_restart_until_reply_is_delivered(self) -> None:
         self.assertTrue(
